@@ -364,25 +364,25 @@ CREATE POLICY "Tenant insert items" ON public.items
   FOR INSERT TO authenticated
   WITH CHECK (
     public.get_auth_role() = 'Superadmin' 
-    OR (tenant_id = public.get_auth_tenant_id() AND public.get_auth_role() = 'Manager')
+    OR (tenant_id = public.get_auth_tenant_id() AND public.get_auth_role() IN ('Admin', 'Manager'))
   );
 
 CREATE POLICY "Tenant update items" ON public.items
   FOR UPDATE TO authenticated
   USING (
     public.get_auth_role() = 'Superadmin' 
-    OR (tenant_id = public.get_auth_tenant_id() AND public.get_auth_role() = 'Manager')
+    OR (tenant_id = public.get_auth_tenant_id() AND public.get_auth_role() IN ('Admin', 'Manager'))
   )
   WITH CHECK (
     public.get_auth_role() = 'Superadmin' 
-    OR (tenant_id = public.get_auth_tenant_id() AND public.get_auth_role() = 'Manager')
+    OR (tenant_id = public.get_auth_tenant_id() AND public.get_auth_role() IN ('Admin', 'Manager'))
   );
 
 CREATE POLICY "Tenant delete items" ON public.items
   FOR DELETE TO authenticated
   USING (
     public.get_auth_role() = 'Superadmin' 
-    OR (tenant_id = public.get_auth_tenant_id() AND public.get_auth_role() = 'Manager')
+    OR (tenant_id = public.get_auth_tenant_id() AND public.get_auth_role() IN ('Admin', 'Manager'))
   );
 
 -- 3. Inventory Table Policies
@@ -423,46 +423,77 @@ DECLARE
     v_caller_role TEXT;
     v_caller_tenant TEXT;
 BEGIN
+    -- Allow internal service_role / background processes unrestricted access
     IF current_user = 'service_role' OR auth.role() = 'service_role' THEN
         RETURN NEW;
     END IF;
 
+    -- Retrieve cryptographic role and tenant of current authenticated caller
     v_caller_role := public.get_auth_role();
     v_caller_tenant := public.get_auth_tenant_id();
 
-    -- Rule A: Only Superadmin can change user roles
+    -- Rule A: Role Modification Guard
     IF (NEW.role IS DISTINCT FROM OLD.role) THEN
-        IF v_caller_role <> 'Superadmin' THEN
-            RAISE EXCEPTION 'Security Exception (403): Only Superadmins are authorized to modify user roles.';
+        -- Only Superadmin or Admin can change roles
+        IF v_caller_role NOT IN ('Superadmin', 'Admin') THEN
+            RAISE EXCEPTION 'Security Exception (403): You are not authorized to modify user roles.';
+        END IF;
+
+        -- If caller is Admin:
+        -- 1. Must be in their own facility
+        -- 2. Cannot modify a Superadmin's role
+        -- 3. CANNOT promote anyone to Superadmin (Only Superadmin can create/assign Superadmin)
+        IF v_caller_role = 'Admin' THEN
+            IF OLD.tenant_id <> v_caller_tenant THEN
+                RAISE EXCEPTION 'Security Exception (403): Admins can only manage user roles within their assigned facility.';
+            END IF;
+            IF OLD.role = 'Superadmin' THEN
+                RAISE EXCEPTION 'Security Exception (403): Admins cannot modify Superadmin accounts.';
+            END IF;
+            IF NEW.role = 'Superadmin' THEN
+                RAISE EXCEPTION 'Security Exception (403): Unauthorized. Only a Superadmin can assign the Superadmin role.';
+            END IF;
         END IF;
     END IF;
 
-    -- Rule B: Only Superadmin can change facility / tenant assignments
+    -- Rule B: Facility / Tenant Assignment Guard (Superadmin Only)
     IF (NEW.tenant_id IS DISTINCT FROM OLD.tenant_id) THEN
         IF v_caller_role <> 'Superadmin' THEN
             RAISE EXCEPTION 'Security Exception (403): Only Superadmins are authorized to modify user facility assignments.';
         END IF;
     END IF;
 
-    -- Rule C: Only Superadmin or Manager can modify account status (Active / Suspended)
+    -- Rule C: Status Modification Guard (Active / Suspended)
     IF (NEW.status IS DISTINCT FROM OLD.status) THEN
-        IF v_caller_role NOT IN ('Superadmin', 'Manager') THEN
+        IF v_caller_role NOT IN ('Superadmin', 'Admin', 'Manager') THEN
             RAISE EXCEPTION 'Security Exception (403): Standard users cannot modify account status.';
         END IF;
+
+        IF v_caller_role = 'Admin' THEN
+            IF OLD.tenant_id <> v_caller_tenant OR OLD.role = 'Superadmin' THEN
+                RAISE EXCEPTION 'Security Exception (403): Admins can only modify status for team members in their own facility and cannot modify Superadmins.';
+            END IF;
+        END IF;
+
         IF v_caller_role = 'Manager' THEN
-            IF OLD.tenant_id <> v_caller_tenant OR OLD.role IN ('Superadmin', 'Manager') THEN
+            IF OLD.tenant_id <> v_caller_tenant OR OLD.role IN ('Superadmin', 'Admin', 'Manager') THEN
                 RAISE EXCEPTION 'Security Exception (403): Managers can only modify status for standard users in their own facility.';
             END IF;
         END IF;
     END IF;
 
-    -- Rule D: Non-owners cannot update other users profile records
+    -- Rule D: Profile Editing Guard
     IF (OLD.id::text <> auth.uid()::text AND (auth.jwt()->>'email' IS NULL OR OLD.email <> auth.jwt()->>'email')) THEN
-        IF v_caller_role NOT IN ('Superadmin', 'Manager') THEN
+        IF v_caller_role NOT IN ('Superadmin', 'Admin', 'Manager') THEN
             RAISE EXCEPTION 'Security Exception (403): Users can only modify their own profile.';
         END IF;
-        IF v_caller_role = 'Manager' AND (OLD.tenant_id <> v_caller_tenant OR OLD.role = 'Superadmin') THEN
-            RAISE EXCEPTION 'Security Exception (403): Managers cannot edit profiles of Superadmins or users outside their assigned facility.';
+
+        IF v_caller_role = 'Admin' AND (OLD.tenant_id <> v_caller_tenant OR OLD.role = 'Superadmin') THEN
+            RAISE EXCEPTION 'Security Exception (403): Admins cannot edit profiles of Superadmins or users outside their assigned facility.';
+        END IF;
+
+        IF v_caller_role = 'Manager' AND (OLD.tenant_id <> v_caller_tenant OR OLD.role IN ('Superadmin', 'Admin', 'Manager')) THEN
+            RAISE EXCEPTION 'Security Exception (403): Managers cannot edit profiles of Admins, Superadmins, or users outside their assigned facility.';
         END IF;
     END IF;
 
@@ -510,8 +541,8 @@ DECLARE
     v_target_tenant TEXT := TRIM(p_tenant_id);
 BEGIN
     -- 1. Validate Target Role
-    IF v_target_role NOT IN ('Superadmin', 'Manager', 'User') THEN
-        RETURN jsonb_build_object('success', false, 'error', 'Invalid role. Permitted roles: Superadmin, Manager, User.');
+    IF v_target_role NOT IN ('Superadmin', 'Admin', 'Manager', 'User') THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Invalid role. Permitted roles: Superadmin, Admin, Manager, User.');
     END IF;
 
     -- 2. Validate Tenant Exists & Is Active
@@ -525,12 +556,22 @@ BEGIN
     WHERE id::text = auth.uid()::text OR email = auth.jwt()->>'email'
     LIMIT 1;
 
-    IF v_caller_role NOT IN ('Superadmin', 'Manager') THEN
-        RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Only Managers and Superadmins can create team members.');
+    IF v_caller_role NOT IN ('Superadmin', 'Admin', 'Manager') THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Only Managers, Admins, and Superadmins can create team members.');
     END IF;
 
-    -- 4. Vertical Privilege Escalation Protection:
-    -- Managers can ONLY create standard 'User' accounts and ONLY within their assigned facility
+    -- 4. Scope & Role Creation Rules:
+    -- Admin: Can create Admin, Manager, and User in their own facility. CANNOT create Superadmin.
+    IF v_caller_role = 'Admin' THEN
+        IF v_target_tenant <> v_caller_tenant THEN
+            RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Admins can only add team members to their assigned facility.');
+        END IF;
+        IF v_target_role = 'Superadmin' THEN
+            RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Only a Superadmin can create or assign the Superadmin role.');
+        END IF;
+    END IF;
+
+    -- Manager: Can ONLY create standard 'User' accounts and ONLY within their assigned facility
     IF v_caller_role = 'Manager' THEN
         IF v_target_tenant <> v_caller_tenant THEN
             RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Managers can only add team members to their assigned facility.');
@@ -619,8 +660,8 @@ BEGIN
     WHERE id::text = auth.uid()::text OR email = auth.jwt()->>'email'
     LIMIT 1;
 
-    IF v_caller_role NOT IN ('Superadmin', 'Manager') THEN
-        RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Only Managers and Superadmins can remove team members.');
+    IF v_caller_role NOT IN ('Superadmin', 'Admin', 'Manager') THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Only Managers, Admins, and Superadmins can remove team members.');
     END IF;
 
     -- Target User Lookup
@@ -632,13 +673,23 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'error', 'Target team member record not found.');
     END IF;
 
+    -- Admin Scope Guard
+    IF v_caller_role = 'Admin' THEN
+        IF v_target_tenant <> v_caller_tenant THEN
+            RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Admins can only remove team members from their assigned facility.');
+        END IF;
+        IF v_target_role = 'Superadmin' THEN
+            RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Admins cannot remove Superadmin accounts.');
+        END IF;
+    END IF;
+
     -- Manager Scope Guard
     IF v_caller_role = 'Manager' THEN
         IF v_target_tenant <> v_caller_tenant THEN
             RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Managers can only remove team members from their assigned facility.');
         END IF;
-        IF v_target_role IN ('Superadmin', 'Manager') THEN
-            RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Managers cannot remove other Managers or Superadmins.');
+        IF v_target_role IN ('Superadmin', 'Admin', 'Manager') THEN
+            RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Managers cannot remove Admins, Managers, or Superadmins.');
         END IF;
     END IF;
 

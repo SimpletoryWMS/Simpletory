@@ -1,6 +1,6 @@
 /**
  * SIMPLETORY WMS - CORE APPLICATION CONTROLLER
- * Ultra-responsive, modern frontend logic with 3-tier RBAC security (Superadmin, Manager, User),
+ * Ultra-responsive, modern frontend logic with 4-tier RBAC security (Superadmin, Admin, Manager, User),
  * automated change logging, and interactive user guides.
  */
 
@@ -88,6 +88,29 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       this.showToast('Session expired after 30 minutes of inactivity.', 'warning');
       this.checkAuthState();
+    },
+
+    // ==========================================
+    // SECURITY UTILITIES: XSS SANITIZATION
+    // ==========================================
+    escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    },
+
+    escapeAttr(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
     },
 
     // ==========================================
@@ -309,9 +332,10 @@ document.addEventListener('DOMContentLoaded', () => {
     applyRolePermissions() {
       const user = window.WMSDataService.currentUser;
       if (!user) return;
-      const role = (user.role === 'Admin') ? 'Superadmin' : (user.role || 'Superadmin');
-      const isSuperadmin = role === 'Superadmin' || role === 'Admin';
-      const isManager = isSuperadmin || role === 'Manager';
+      const role = user.role || 'User';
+      const isSuperadmin = role === 'Superadmin';
+      const isAdmin = isSuperadmin || role === 'Admin';
+      const isManager = isAdmin || role === 'Manager';
 
       // Update header badge and dropdown display
       const avatarEl = document.getElementById('header-user-avatar');
@@ -333,7 +357,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (dropEmailEl) dropEmailEl.textContent = user.email || `${user.username || 'user'}@simpletory.com`;
       if (dropRoleBadgeEl) {
         dropRoleBadgeEl.textContent = role;
-        dropRoleBadgeEl.className = `badge ${isSuperadmin ? 'badge-primary' : role === 'Manager' ? 'badge-warning' : 'badge-secondary'} user-dropdown-role-badge`;
+        const badgeClass = isSuperadmin ? 'badge-danger' : (role === 'Admin' ? 'badge-primary' : (role === 'Manager' ? 'badge-warning' : 'badge-neutral'));
+        dropRoleBadgeEl.className = `badge ${badgeClass} user-dropdown-role-badge`;
       }
 
       // 1. Settings View (Supabase Link): Locked to Superadmin only
@@ -348,13 +373,13 @@ document.addEventListener('DOMContentLoaded', () => {
         tenantPicker.style.display = isSuperadmin ? 'flex' : 'none';
       }
 
-      // 3. Team & User Management: Locked to Superadmin and Manager
+      // 3. Team & User Management: Locked to Superadmin, Admin, and Manager
       const navUsers = document.getElementById('nav-users');
       if (navUsers) {
         navUsers.style.display = isManager ? 'flex' : 'none';
       }
 
-      // 4. Catalog Creation / Editing: Locked to Superadmin and Manager
+      // 4. Catalog Creation / Editing: Locked to Superadmin, Admin, and Manager
       const btnDashNew = document.getElementById('btn-dash-new-sku');
       const btnCatNew = document.getElementById('btn-catalog-add-sku');
       if (btnDashNew) btnDashNew.style.display = isManager ? 'inline-flex' : 'none';
@@ -396,16 +421,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     switchView(viewName) {
       const user = window.WMSDataService.currentUser;
-      const role = user ? ((user.role === 'Admin') ? 'Superadmin' : user.role) : 'User';
-      const isSuperadmin = role === 'Superadmin' || role === 'Admin';
-      const isManager = isSuperadmin || role === 'Manager';
+      const role = user ? user.role : 'User';
+      const isSuperadmin = role === 'Superadmin';
+      const isAdmin = isSuperadmin || role === 'Admin';
+      const isManager = isAdmin || role === 'Manager';
 
       // Guard locked views
       if (viewName === 'settings' && !isSuperadmin) {
         return this.showToast('Access Denied: System settings are restricted to Superadmin.', 'danger');
       }
       if (viewName === 'users' && !isManager) {
-        return this.showToast('Access Denied: Team management is restricted to Managers and Superadmins.', 'warning');
+        return this.showToast('Access Denied: Team management is restricted to Managers, Admins, and Superadmins.', 'warning');
       }
 
       this.currentView = viewName;
@@ -439,7 +465,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const select = document.getElementById('tenant-select');
       if (select) {
-        select.innerHTML = this.tenants.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+        select.innerHTML = this.tenants.map(t => `<option value="${this.escapeAttr(t.id)}">${this.escapeHtml(t.name)}</option>`).join('');
         // If current active tenant became inactive, switch to first active
         if (!this.tenants.some(t => t.id === window.WMSDataService.activeTenantId) && this.tenants.length > 0) {
           window.WMSDataService.activeTenantId = this.tenants[0].id;
@@ -469,12 +495,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         return `
           <tr>
-            <td><code style="font-family: var(--font-mono); font-weight: 600;">${t.id}</code></td>
-            <td><strong>${t.name}</strong></td>
+            <td><code style="font-family: var(--font-mono); font-weight: 600;">${this.escapeHtml(t.id)}</code></td>
+            <td><strong>${this.escapeHtml(t.name)}</strong></td>
             <td><span class="badge ${statusBadge}">${statusText}</span></td>
             <td style="color: var(--text-muted); font-size: 0.8rem;">${t.created_at ? new Date(t.created_at).toLocaleDateString() : 'Initial'}</td>
             <td style="text-align: right;">
-              <button class="btn ${btnClass} btn-sm" onclick="App.toggleTenant('${t.id}', ${!isActive})">
+              <button class="btn ${btnClass} btn-sm" onclick="App.toggleTenant('${this.escapeAttr(t.id)}', ${!isActive})">
                 ${btnText}
               </button>
             </td>
@@ -501,7 +527,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async refreshAllData() {
       const tenantId = window.WMSDataService.activeTenantId;
       const currentUser = window.WMSDataService.currentUser;
-      const isSuperadmin = currentUser && (currentUser.role === 'Superadmin' || currentUser.role === 'Admin');
+      const isSuperadmin = currentUser && currentUser.role === 'Superadmin';
 
       [this.items, this.inventory, this.history, this.users] = await Promise.all([
         window.WMSDataService.getItems(tenantId),
@@ -586,7 +612,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return `
               <div style="margin-bottom: 0.85rem;">
                 <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 4px;">
-                  <span style="font-weight: 600;">${cat}</span>
+                  <span style="font-weight: 600;">${this.escapeHtml(cat)}</span>
                   <span style="color: var(--text-muted);">${qty.toLocaleString()} units (${percent}%)</span>
                 </div>
                 <div style="height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden;">
@@ -613,10 +639,10 @@ document.addEventListener('DOMContentLoaded', () => {
             return `
               <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid var(--border-subtle);">
                 <div style="display: flex; align-items: center; gap: 0.75rem;">
-                  <span class="badge ${badgeClass}">${h.action_type}</span>
+                  <span class="badge ${badgeClass}">${this.escapeHtml(h.action_type)}</span>
                   <div>
-                    <div style="font-weight: 600; font-size: 0.85rem;">${h.item_name} <span class="sku-tag">(${h.sku})</span></div>
-                    <div style="font-size: 0.75rem; color: var(--text-muted);">${h.notes || 'Movement logged'} • By ${h.user_name}</div>
+                    <div style="font-weight: 600; font-size: 0.85rem;">${this.escapeHtml(h.item_name)} <span class="sku-tag">(${this.escapeHtml(h.sku)})</span></div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted);">${this.escapeHtml(h.notes || 'Movement logged')} • By ${this.escapeHtml(h.user_name)}</div>
                   </div>
                 </div>
                 <div style="text-align: right;">
@@ -661,43 +687,44 @@ document.addEventListener('DOMContentLoaded', () => {
       if (filtered.length === 0) {
         tbody.innerHTML = `<tr><td colspan="11" style="text-align: center; padding: 2rem; color: var(--text-muted);">No inventory records found matching your filters.</td></tr>`;
         return;
-      }
-
-      tbody.innerHTML = filtered.map(inv => {
+      }      tbody.innerHTML = filtered.map(inv => {
         const item = this.items.find(i => i.id === inv.item_id) || { sku: 'Unknown', name: 'Unknown', category: 'General', sub_category: 'Standard', uom: 'EA', unit_cost: 0 };
         const extVal = (Number(inv.quantity) * Number(item.unit_cost)).toFixed(2);
         const statusBadge = inv.status === 'Available' ? 'badge-success' : inv.status === 'Low Stock' ? 'badge-warning' : 'badge-danger';
+        const safeItemId = this.escapeAttr(inv.item_id);
+        const safeLocation = this.escapeAttr(inv.location);
+        const safeQty = Number(inv.quantity) || 0;
 
         return `
           <tr>
-            <td><span class="sku-tag">${item.sku}</span></td>
-            <td style="font-weight: 600;">${item.name}</td>
-            <td><span class="badge badge-neutral">${item.category || 'General'}</span></td>
-            <td><span class="badge badge-neutral" style="opacity: 0.85;">${item.sub_category || 'Standard'}</span></td>
-            <td><span class="location-tag">${inv.location}</span></td>
+            <td><span class="sku-tag">${this.escapeHtml(item.sku)}</span></td>
+            <td style="font-weight: 600;">${this.escapeHtml(item.name)}</td>
+            <td><span class="badge badge-neutral">${this.escapeHtml(item.category || 'General')}</span></td>
+            <td><span class="badge badge-neutral" style="opacity: 0.85;">${this.escapeHtml(item.sub_category || 'Standard')}</span></td>
+            <td><span class="location-tag">${this.escapeHtml(inv.location)}</span></td>
             <td>
               <div class="qty-stepper-cell">
-                <button class="qty-stepper-btn btn-minus" title="Subtract stock (-)" onclick="App.openQuickDispatch('${inv.item_id}', '${inv.location}', ${inv.quantity})">−</button>
-                <strong style="font-size: 0.95rem; min-width: 28px; text-align: center;">${inv.quantity}</strong>
-                <button class="qty-stepper-btn btn-plus" title="Add stock (+)" onclick="App.openQuickIntake('${inv.item_id}', '${inv.location}')">+</button>
+                <button class="qty-stepper-btn btn-minus" title="Subtract stock (-)" onclick="App.openQuickDispatch('${safeItemId}', '${safeLocation}', ${safeQty})">−</button>
+                <strong style="font-size: 0.95rem; min-width: 28px; text-align: center;">${safeQty}</strong>
+                <button class="qty-stepper-btn btn-plus" title="Add stock (+)" onclick="App.openQuickIntake('${safeItemId}', '${safeLocation}')">+</button>
               </div>
             </td>
-            <td><span style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">${item.uom}</span></td>
+            <td><span style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">${this.escapeHtml(item.uom)}</span></td>
             <td>$${Number(item.unit_cost).toFixed(2)}</td>
             <td><strong>$${extVal}</strong></td>
-            <td><span class="badge ${statusBadge}">${inv.status}</span></td>
+            <td><span class="badge ${statusBadge}">${this.escapeHtml(inv.status)}</span></td>
             <td>
               <div class="table-actions">
-                <button class="action-btn action-btn-add" title="Quick Add (+)" onclick="App.openQuickIntake('${inv.item_id}', '${inv.location}')">
+                <button class="action-btn action-btn-add" title="Quick Add (+)" onclick="App.openQuickIntake('${safeItemId}', '${safeLocation}')">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14m-7-7h14"/></svg> + Add
                 </button>
-                <button class="action-btn action-btn-sub" title="Quick Subtract (-)" onclick="App.openQuickDispatch('${inv.item_id}', '${inv.location}', ${inv.quantity})">
+                <button class="action-btn action-btn-sub" title="Quick Subtract (-)" onclick="App.openQuickDispatch('${safeItemId}', '${safeLocation}', ${safeQty})">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14"/></svg> − Subtract
                 </button>
-                <button class="action-btn" title="Transfer Location" onclick="App.openTransferModal('${inv.item_id}', '${inv.location}', ${inv.quantity})">
+                <button class="action-btn" title="Transfer Location" onclick="App.openTransferModal('${safeItemId}', '${safeLocation}', ${safeQty})">
                   ⇄ Move
                 </button>
-                <button class="action-btn" title="Audit Count / Adjust" onclick="App.openAdjustModal('${inv.item_id}', '${inv.location}', ${inv.quantity})">
+                <button class="action-btn" title="Audit Count / Adjust" onclick="App.openAdjustModal('${safeItemId}', '${safeLocation}', ${safeQty})">
                   ⚙ Adjust
                 </button>
               </div>
@@ -715,7 +742,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!tbody) return;
 
       const role = window.WMSDataService.currentUser?.role || this.currentUser?.role || 'User';
-      const canManage = role === 'Superadmin' || role === 'Manager';
+      const canManage = role === 'Superadmin' || role === 'Admin' || role === 'Manager';
 
       const searchTerm = (document.getElementById('items-search-input')?.value || '').toLowerCase().trim();
       const catFilter = document.getElementById('items-category-filter')?.value || '';
@@ -723,7 +750,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const filtered = this.items.filter(item => {
         const matchesSearch = !searchTerm || 
           item.sku.toLowerCase().includes(searchTerm) || 
-          item.name.toLowerCase().includes(searchTerm) ||
+          item.name.toLowerCase().includes(searchTerm) || 
           (item.sub_category && item.sub_category.toLowerCase().includes(searchTerm));
         const matchesCat = !catFilter || item.category === catFilter;
         return matchesSearch && matchesCat;
@@ -735,20 +762,21 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       tbody.innerHTML = filtered.map(item => {
+        const safeItemId = this.escapeAttr(item.id);
         const actionsHtml = canManage ? `
           <div class="table-actions">
-            <button class="action-btn" title="Edit SKU" onclick="App.openEditItemModal('${item.id}')">✏ Edit</button>
-            <button class="action-btn" style="color: var(--danger);" title="Delete" onclick="App.handleDeleteItem('${item.id}')">🗑</button>
+            <button class="action-btn" title="Edit SKU" onclick="App.openEditItemModal('${safeItemId}')">✏ Edit</button>
+            <button class="action-btn" style="color: var(--danger);" title="Delete" onclick="App.handleDeleteItem('${safeItemId}')">🗑</button>
           </div>
         ` : `<span class="badge badge-neutral">Read Only</span>`;
 
         return `
           <tr>
-            <td><span class="sku-tag">${item.sku}</span></td>
-            <td style="font-weight: 600;">${item.name}</td>
-            <td><span class="badge badge-neutral">${item.category || 'General'}</span></td>
-            <td><span class="badge badge-neutral" style="opacity: 0.85;">${item.sub_category || 'Standard'}</span></td>
-            <td>${item.uom}</td>
+            <td><span class="sku-tag">${this.escapeHtml(item.sku)}</span></td>
+            <td style="font-weight: 600;">${this.escapeHtml(item.name)}</td>
+            <td><span class="badge badge-neutral">${this.escapeHtml(item.category || 'General')}</span></td>
+            <td><span class="badge badge-neutral" style="opacity: 0.85;">${this.escapeHtml(item.sub_category || 'Standard')}</span></td>
+            <td>${this.escapeHtml(item.uom)}</td>
             <td>$${Number(item.unit_cost || 0).toFixed(2)}</td>
             <td><span style="font-weight: 600; color: var(--warning);">${item.reorder_point || 0}</span></td>
             <td>${actionsHtml}</td>
@@ -793,9 +821,9 @@ document.addEventListener('DOMContentLoaded', () => {
         return `
           <tr>
             <td style="font-size: 0.78rem; color: var(--text-secondary);">${formattedDate}</td>
-            <td><span class="sku-tag">${h.sku}</span></td>
-            <td style="font-weight: 600;">${h.item_name}</td>
-            <td><span class="badge ${badgeClass}">${h.action_type}</span></td>
+            <td><span class="sku-tag">${this.escapeHtml(h.sku)}</span></td>
+            <td style="font-weight: 600;">${this.escapeHtml(h.item_name)}</td>
+            <td><span class="badge ${badgeClass}">${this.escapeHtml(h.action_type)}</span></td>
             <td>
               <strong style="color: ${isAdd ? 'var(--success)' : isSub ? 'var(--danger)' : 'var(--text-primary)'};">
                 ${isAdd ? '+' : ''}${h.qty_change}
@@ -803,9 +831,9 @@ document.addEventListener('DOMContentLoaded', () => {
             </td>
             <td>${h.previous_qty}</td>
             <td>${h.new_qty}</td>
-            <td><span class="location-tag">${h.location}</span></td>
-            <td style="font-weight: 500;">${h.user_name}</td>
-            <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px;">${h.notes || '-'}</td>
+            <td><span class="location-tag">${this.escapeHtml(h.location)}</span></td>
+            <td style="font-weight: 500;">${this.escapeHtml(h.user_name)}</td>
+            <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px;">${this.escapeHtml(h.notes || '-')}</td>
           </tr>
         `;
       }).join('');
@@ -819,36 +847,51 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!tbody) return;
 
       const allTenantsList = this.allTenants || this.tenants || [];
+      const currentUser = window.WMSDataService.currentUser;
+      const callerRole = currentUser?.role || 'User';
+      const isCallerSuperadmin = callerRole === 'Superadmin';
 
       tbody.innerHTML = this.users.map(u => {
-        const roleBadge = u.role === 'Superadmin' ? 'badge-danger' : u.role === 'Manager' ? 'badge-warning' : 'badge-info';
+        const roleBadge = u.role === 'Superadmin' ? 'badge-danger' : (u.role === 'Admin' ? 'badge-primary' : (u.role === 'Manager' ? 'badge-warning' : 'badge-info'));
         const tenantObj = allTenantsList.find(t => t.id === u.tenant_id);
         const tenantName = tenantObj ? tenantObj.name : (u.tenant_id || 'Primary Facility');
+        const safeUserId = this.escapeAttr(u.id);
 
         const lastLogin = u.last_login_at 
           ? `<span title="${new Date(u.last_login_at).toLocaleString()}">${new Date(u.last_login_at).toLocaleDateString()} ${new Date(u.last_login_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>` 
           : `<span style="color: var(--text-muted); font-size: 0.78rem;">Never</span>`;
 
+        let canManageUser = false;
+        if (isCallerSuperadmin) {
+          canManageUser = true;
+        } else if (callerRole === 'Admin') {
+          canManageUser = (u.tenant_id === currentUser?.tenant_id) && u.role !== 'Superadmin';
+        } else if (callerRole === 'Manager') {
+          canManageUser = (u.tenant_id === currentUser?.tenant_id) && u.role === 'User';
+        }
+
+        const actionsHtml = canManageUser ? `
+          <div class="table-actions">
+            <button class="action-btn" onclick="App.openEditUserModal('${safeUserId}')">✏ Edit</button>
+            <button class="action-btn" style="color: var(--danger);" onclick="App.handleDeleteUser('${safeUserId}')">🗑</button>
+          </div>
+        ` : `<span class="badge badge-neutral">Read Only</span>`;
+
         return `
           <tr>
             <td>
               <div style="display: flex; align-items: center; gap: 0.65rem;">
-                <div class="user-avatar" style="width:26px; height:26px; font-size:0.7rem;">${(u.full_name || 'U').charAt(0)}</div>
-                <strong style="font-size: 0.85rem;">${u.full_name || 'User'}</strong>
+                <div class="user-avatar" style="width:26px; height:26px; font-size:0.7rem;">${this.escapeHtml((u.full_name || 'U').charAt(0))}</div>
+                <strong style="font-size: 0.85rem;">${this.escapeHtml(u.full_name || 'User')}</strong>
               </div>
             </td>
-            <td><code style="font-family: var(--font-mono);">${u.username}</code></td>
-            <td style="color: var(--text-secondary);">${u.email || '-'}</td>
-            <td><span class="badge badge-neutral">${tenantName}</span></td>
-            <td><span class="badge ${roleBadge}">${u.role}</span></td>
-            <td><span class="badge ${u.status === 'Active' ? 'badge-success' : 'badge-neutral'}">${u.status || 'Active'}</span></td>
+            <td><code style="font-family: var(--font-mono);">${this.escapeHtml(u.username)}</code></td>
+            <td style="color: var(--text-secondary);">${this.escapeHtml(u.email || '-')}</td>
+            <td><span class="badge badge-neutral">${this.escapeHtml(tenantName)}</span></td>
+            <td><span class="badge ${roleBadge}">${this.escapeHtml(u.role)}</span></td>
+            <td><span class="badge ${u.status === 'Active' ? 'badge-success' : 'badge-neutral'}">${this.escapeHtml(u.status || 'Active')}</span></td>
             <td style="font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap;">${lastLogin}</td>
-            <td>
-              <div class="table-actions">
-                <button class="action-btn" onclick="App.openEditUserModal('${u.id}')">✏ Edit</button>
-                <button class="action-btn" style="color: var(--danger);" onclick="App.handleDeleteUser('${u.id}')">🗑</button>
-              </div>
-            </td>
+            <td>${actionsHtml}</td>
           </tr>
         `;
       }).join('');
@@ -1166,15 +1209,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
       tbody.innerHTML = rowsData.map(r => `
         <tr>
-          <td><span class="sku-tag">${r.item.sku}</span></td>
-          <td style="font-weight: 600;">${r.item.name}</td>
-          <td><span class="badge badge-neutral">${r.item.category || 'General'}</span></td>
+          <td><span class="sku-tag">${this.escapeHtml(r.item.sku)}</span></td>
+          <td style="font-weight: 600;">${this.escapeHtml(r.item.name)}</td>
+          <td><span class="badge badge-neutral">${this.escapeHtml(r.item.category || 'General')}</span></td>
           <td style="text-align: right; color: var(--success); font-weight: 600;">${r.inbound > 0 ? '+' + r.inbound : '0'}</td>
           <td style="text-align: right; color: var(--danger); font-weight: 600;">${r.outbound > 0 ? '-' + r.outbound : '0'}</td>
           <td style="text-align: right; color: ${r.adjust >= 0 ? 'var(--text-primary)' : 'var(--danger)'}; font-weight: 500;">${r.adjust > 0 ? '+' + r.adjust : r.adjust}</td>
           <td style="text-align: right; font-weight: 700; color: ${r.net >= 0 ? 'var(--success)' : 'var(--danger)'};">${r.net >= 0 ? '+' : ''}${r.net}</td>
           <td style="text-align: right; font-weight: 600;">${r.onHand}</td>
-          <td style="font-size: 0.8rem; color: var(--text-secondary);">${r.item.uom || 'EA'}</td>
+          <td style="font-size: 0.8rem; color: var(--text-secondary);">${this.escapeHtml(r.item.uom || 'EA')}</td>
           <td style="text-align: right; font-size: 0.82rem;">$${r.unitCost.toFixed(2)}</td>
           <td style="text-align: right; font-weight: 600; color: ${r.netValue >= 0 ? 'var(--success)' : 'var(--danger)'};">$${r.netValue.toFixed(2)}</td>
           <td style="text-align: center;"><span class="badge badge-info">${r.moves}</span></td>
@@ -1298,16 +1341,16 @@ document.addEventListener('DOMContentLoaded', () => {
       tbody.innerHTML = rowsData.map(r => `
         <tr>
           <td style="font-size: 0.78rem; color: var(--text-secondary);">${new Date(r.h.created_at).toLocaleString()}</td>
-          <td><span class="sku-tag">${r.h.sku}</span></td>
-          <td style="font-weight: 600;">${r.h.item_name}</td>
-          <td><span class="badge badge-neutral">${r.item.category || 'General'}</span></td>
-          <td><span class="location-tag">${r.h.location}</span></td>
+          <td><span class="sku-tag">${this.escapeHtml(r.h.sku)}</span></td>
+          <td style="font-weight: 600;">${this.escapeHtml(r.h.item_name)}</td>
+          <td><span class="badge badge-neutral">${this.escapeHtml(r.item.category || 'General')}</span></td>
+          <td><span class="location-tag">${this.escapeHtml(r.h.location)}</span></td>
           <td style="text-align: right; color: var(--success); font-weight: 700;">+${r.qty}</td>
-          <td style="font-size: 0.8rem; color: var(--text-secondary);">${r.item.uom || 'EA'}</td>
+          <td style="font-size: 0.8rem; color: var(--text-secondary);">${this.escapeHtml(r.item.uom || 'EA')}</td>
           <td style="text-align: right; font-size: 0.82rem;">$${r.unitCost.toFixed(2)}</td>
           <td style="text-align: right; font-weight: 600; color: var(--success);">$${r.extVal.toFixed(2)}</td>
-          <td style="font-weight: 500;">${r.h.user_name}</td>
-          <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 180px;">${r.h.notes || '-'}</td>
+          <td style="font-weight: 500;">${this.escapeHtml(r.h.user_name)}</td>
+          <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 180px;">${this.escapeHtml(r.h.notes || '-')}</td>
         </tr>
       `).join('');
 
@@ -1424,16 +1467,16 @@ document.addEventListener('DOMContentLoaded', () => {
       tbody.innerHTML = rowsData.map(r => `
         <tr>
           <td style="font-size: 0.78rem; color: var(--text-secondary);">${new Date(r.h.created_at).toLocaleString()}</td>
-          <td><span class="sku-tag">${r.h.sku}</span></td>
-          <td style="font-weight: 600;">${r.h.item_name}</td>
-          <td><span class="badge badge-neutral">${r.item.category || 'General'}</span></td>
-          <td><span class="location-tag">${r.h.location}</span></td>
+          <td><span class="sku-tag">${this.escapeHtml(r.h.sku)}</span></td>
+          <td style="font-weight: 600;">${this.escapeHtml(r.h.item_name)}</td>
+          <td><span class="badge badge-neutral">${this.escapeHtml(r.item.category || 'General')}</span></td>
+          <td><span class="location-tag">${this.escapeHtml(r.h.location)}</span></td>
           <td style="text-align: right; color: var(--danger); font-weight: 700;">-${r.qty}</td>
-          <td style="font-size: 0.8rem; color: var(--text-secondary);">${r.item.uom || 'EA'}</td>
+          <td style="font-size: 0.8rem; color: var(--text-secondary);">${this.escapeHtml(r.item.uom || 'EA')}</td>
           <td style="text-align: right; font-size: 0.82rem;">$${r.unitCost.toFixed(2)}</td>
           <td style="text-align: right; font-weight: 600; color: var(--danger);">$${r.extVal.toFixed(2)}</td>
-          <td style="font-weight: 500;">${r.h.user_name}</td>
-          <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 180px;">${r.h.notes || '-'}</td>
+          <td style="font-weight: 500;">${this.escapeHtml(r.h.user_name)}</td>
+          <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 180px;">${this.escapeHtml(r.h.notes || '-')}</td>
         </tr>
       `).join('');
 
@@ -1556,16 +1599,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const badgeClass = r.status === 'In Stock' ? 'badge-success' : r.status === 'Low Stock' ? 'badge-warning' : 'badge-danger';
         return `
           <tr>
-            <td><span class="sku-tag">${r.item.sku || '-'}</span></td>
-            <td style="font-weight: 600;">${r.item.name || 'Unknown Item'}</td>
-            <td><span class="badge badge-neutral">${r.item.category || 'General'}</span></td>
-            <td><span class="location-tag">${r.inv.location}</span></td>
+            <td><span class="sku-tag">${this.escapeHtml(r.item.sku || '-')}</span></td>
+            <td style="font-weight: 600;">${this.escapeHtml(r.item.name || 'Unknown Item')}</td>
+            <td><span class="badge badge-neutral">${this.escapeHtml(r.item.category || 'General')}</span></td>
+            <td><span class="location-tag">${this.escapeHtml(r.inv.location)}</span></td>
             <td style="text-align: right; font-weight: 700;">${r.qty}</td>
-            <td style="font-size: 0.8rem; color: var(--text-secondary);">${r.item.uom || 'EA'}</td>
+            <td style="font-size: 0.8rem; color: var(--text-secondary);">${this.escapeHtml(r.item.uom || 'EA')}</td>
             <td style="text-align: right; font-size: 0.82rem; color: var(--text-secondary);">${r.reorderPoint}</td>
             <td style="text-align: right; font-size: 0.82rem;">$${r.unitCost.toFixed(2)}</td>
             <td style="text-align: right; font-weight: 600; color: var(--accent);">$${r.extVal.toFixed(2)}</td>
-            <td><span class="badge ${badgeClass}">${r.status}</span></td>
+            <td><span class="badge ${badgeClass}">${this.escapeHtml(r.status)}</span></td>
           </tr>
         `;
       }).join('');
@@ -1676,17 +1719,17 @@ document.addEventListener('DOMContentLoaded', () => {
         return `
           <tr>
             <td style="font-size: 0.78rem; color: var(--text-secondary);">${new Date(h.created_at).toLocaleString()}</td>
-            <td><span class="badge ${badgeClass}">${h.action_type}</span></td>
-            <td><span class="sku-tag">${h.sku}</span></td>
-            <td style="font-weight: 600;">${h.item_name}</td>
-            <td><span class="location-tag">${h.location}</span></td>
+            <td><span class="badge ${badgeClass}">${this.escapeHtml(h.action_type)}</span></td>
+            <td><span class="sku-tag">${this.escapeHtml(h.sku)}</span></td>
+            <td style="font-weight: 600;">${this.escapeHtml(h.item_name)}</td>
+            <td><span class="location-tag">${this.escapeHtml(h.location)}</span></td>
             <td style="text-align: right; font-weight: 700; color: ${isAdd ? 'var(--success)' : isSub ? 'var(--danger)' : 'var(--text-primary)'};">
               ${isAdd ? '+' : ''}${h.qty_change}
             </td>
             <td style="text-align: right; color: var(--text-secondary);">${h.previous_qty}</td>
             <td style="text-align: right; font-weight: 600;">${h.new_qty}</td>
-            <td style="font-weight: 500;">${h.user_name}</td>
-            <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px;">${h.notes || '-'}</td>
+            <td style="font-weight: 500;">${this.escapeHtml(h.user_name)}</td>
+            <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px;">${this.escapeHtml(h.notes || '-')}</td>
           </tr>
         `;
       }).join('');
@@ -1919,7 +1962,7 @@ document.addEventListener('DOMContentLoaded', () => {
     populateDropdowns() {
       // Collect unique categories
       const categories = Array.from(new Set(this.items.map(i => i.category || 'General'))).sort();
-      const catOptions = `<option value="">All Categories</option>` + categories.map(c => `<option value="${c}">${c}</option>`).join('');
+      const catOptions = `<option value="">All Categories</option>` + categories.map(c => `<option value="${this.escapeAttr(c)}">${this.escapeHtml(c)}</option>`).join('');
 
       const invCatSelect = document.getElementById('inventory-category-filter');
       const itemCatSelect = document.getElementById('items-category-filter');
@@ -1928,12 +1971,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (itemCatSelect) itemCatSelect.innerHTML = catOptions;
       if (repCatSelect) {
         const curVal = repCatSelect.value || 'ALL';
-        repCatSelect.innerHTML = `<option value="ALL">All Categories</option>` + categories.map(c => `<option value="${c}">${c}</option>`).join('');
+        repCatSelect.innerHTML = `<option value="ALL">All Categories</option>` + categories.map(c => `<option value="${this.escapeAttr(c)}">${this.escapeHtml(c)}</option>`).join('');
         if (categories.includes(curVal)) repCatSelect.value = curVal;
       }
 
       // Populate item selects in modals
-      const itemOptions = `<option value="">-- Select Catalog Item --</option>` + this.items.map(i => `<option value="${i.id}">${i.sku} - ${i.name}</option>`).join('');
+      const itemOptions = `<option value="">-- Select Catalog Item --</option>` + this.items.map(i => `<option value="${this.escapeAttr(i.id)}">${this.escapeHtml(i.sku)} - ${this.escapeHtml(i.name)}</option>`).join('');
       
       const intakeItemSelect = document.getElementById('intake-item-select');
       const dispatchItemSelect = document.getElementById('dispatch-item-select');
@@ -2114,8 +2157,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     openNewItemModal() {
       const role = window.WMSDataService.currentUser?.role || this.currentUser?.role || 'User';
-      if (role !== 'Superadmin' && role !== 'Manager') {
-        return this.showToast('Permission Denied: Only Managers and Superadmins can add catalog items.', 'warning');
+      if (role !== 'Superadmin' && role !== 'Admin' && role !== 'Manager') {
+        return this.showToast('Permission Denied: Only Managers, Admins, and Superadmins can add catalog items.', 'warning');
       }
 
       const form = document.getElementById('form-item');
@@ -2129,8 +2172,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     openEditItemModal(itemId) {
       const role = window.WMSDataService.currentUser?.role || this.currentUser?.role || 'User';
-      if (role !== 'Superadmin' && role !== 'Manager') {
-        return this.showToast('Permission Denied: Only Managers and Superadmins can edit catalog items.', 'warning');
+      if (role !== 'Superadmin' && role !== 'Admin' && role !== 'Manager') {
+        return this.showToast('Permission Denied: Only Managers, Admins, and Superadmins can edit catalog items.', 'warning');
       }
 
       const item = this.items.find(i => i.id === itemId);
@@ -2155,15 +2198,45 @@ document.addEventListener('DOMContentLoaded', () => {
     },
 
     openNewUserModal() {
-      const role = window.WMSDataService.currentUser?.role;
-      if (role !== 'Superadmin' && role !== 'Manager') {
-        return this.showToast('Permission Denied: Only Managers and Superadmins can add team members.', 'warning');
+      const currentUser = window.WMSDataService.currentUser;
+      const role = currentUser?.role || 'User';
+      const isSuperadmin = role === 'Superadmin';
+      const isAdmin = isSuperadmin || role === 'Admin';
+      const isManager = isAdmin || role === 'Manager';
+
+      if (!isManager) {
+        return this.showToast('Permission Denied: Only Managers, Admins, and Superadmins can add team members.', 'warning');
       }
 
       const form = document.getElementById('form-user');
       if (form) form.reset();
       document.getElementById('user-id').value = '';
       document.getElementById('modal-user-title').textContent = 'Add Team Member';
+
+      // Dynamically configure allowed roles
+      const roleSelect = document.getElementById('user-role');
+      if (roleSelect) {
+        if (isSuperadmin) {
+          roleSelect.innerHTML = `
+            <option value="User">User (Standard Inventory Staff)</option>
+            <option value="Manager">Manager (Staff & Inventory Lead)</option>
+            <option value="Admin">Admin (Facility Administrator)</option>
+            <option value="Superadmin">Superadmin (Global Database Admin)</option>
+          `;
+        } else if (role === 'Admin') {
+          roleSelect.innerHTML = `
+            <option value="User">User (Standard Inventory Staff)</option>
+            <option value="Manager">Manager (Staff & Inventory Lead)</option>
+            <option value="Admin">Admin (Facility Administrator)</option>
+          `;
+        } else {
+          // Manager can only create standard User accounts
+          roleSelect.innerHTML = `
+            <option value="User">User (Standard Inventory Staff)</option>
+          `;
+        }
+        roleSelect.value = 'User';
+      }
 
       const pwdGroup = document.getElementById('user-password-group');
       const pwdInput = document.getElementById('user-password');
@@ -2173,28 +2246,64 @@ document.addEventListener('DOMContentLoaded', () => {
       const tenantSelect = document.getElementById('user-tenant-select');
       if (tenantSelect) {
         const list = this.allTenants || this.tenants || [];
-        tenantSelect.innerHTML = list.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
-        tenantSelect.value = window.WMSDataService.activeTenantId;
-        tenantSelect.disabled = (role !== 'Superadmin' && role !== 'Admin');
+        tenantSelect.innerHTML = list.map(t => `<option value="${this.escapeAttr(t.id)}">${this.escapeHtml(t.name)}</option>`).join('');
+        tenantSelect.value = currentUser.tenant_id || window.WMSDataService.activeTenantId;
+        tenantSelect.disabled = !isSuperadmin;
       }
 
       this.openModal('modal-user');
     },
 
     openEditUserModal(userId) {
-      const role = window.WMSDataService.currentUser?.role;
-      if (role !== 'Superadmin' && role !== 'Manager') {
-        return this.showToast('Permission Denied: Only Managers and Superadmins can edit team members.', 'warning');
+      const currentUser = window.WMSDataService.currentUser;
+      const callerRole = currentUser?.role || 'User';
+      const isCallerSuperadmin = callerRole === 'Superadmin';
+      const isCallerAdmin = isCallerSuperadmin || callerRole === 'Admin';
+      const isCallerManager = isCallerAdmin || callerRole === 'Manager';
+
+      if (!isCallerManager) {
+        return this.showToast('Permission Denied: Only Managers, Admins, and Superadmins can edit team members.', 'warning');
       }
 
       const user = this.users.find(u => u.id === userId);
       if (!user) return;
 
+      // Scope guard:
+      if (callerRole === 'Manager' && (user.role !== 'User' || user.tenant_id !== currentUser?.tenant_id)) {
+        return this.showToast('Permission Denied: Managers can only edit standard Users in their assigned facility.', 'warning');
+      }
+      if (callerRole === 'Admin' && (user.role === 'Superadmin' || user.tenant_id !== currentUser?.tenant_id)) {
+        return this.showToast('Permission Denied: Admins cannot edit Superadmin accounts or users outside their assigned facility.', 'warning');
+      }
+
       document.getElementById('user-id').value = user.id;
       document.getElementById('user-fullname').value = user.full_name || '';
       document.getElementById('user-username').value = user.username || '';
       document.getElementById('user-email').value = user.email || '';
-      document.getElementById('user-role').value = user.role || 'User';
+
+      // Dynamically configure allowed roles
+      const roleSelect = document.getElementById('user-role');
+      if (roleSelect) {
+        if (isCallerSuperadmin) {
+          roleSelect.innerHTML = `
+            <option value="User">User (Standard Inventory Staff)</option>
+            <option value="Manager">Manager (Staff & Inventory Lead)</option>
+            <option value="Admin">Admin (Facility Administrator)</option>
+            <option value="Superadmin">Superadmin (Global Database Admin)</option>
+          `;
+        } else if (callerRole === 'Admin') {
+          roleSelect.innerHTML = `
+            <option value="User">User (Standard Inventory Staff)</option>
+            <option value="Manager">Manager (Staff & Inventory Lead)</option>
+            <option value="Admin">Admin (Facility Administrator)</option>
+          `;
+        } else {
+          roleSelect.innerHTML = `
+            <option value="User">User (Standard Inventory Staff)</option>
+          `;
+        }
+        roleSelect.value = user.role || 'User';
+      }
 
       const pwdGroup = document.getElementById('user-password-group');
       const pwdInput = document.getElementById('user-password');
@@ -2204,9 +2313,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const tenantSelect = document.getElementById('user-tenant-select');
       if (tenantSelect) {
         const list = this.allTenants || this.tenants || [];
-        tenantSelect.innerHTML = list.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+        tenantSelect.innerHTML = list.map(t => `<option value="${this.escapeAttr(t.id)}">${this.escapeHtml(t.name)}</option>`).join('');
         tenantSelect.value = user.tenant_id || window.WMSDataService.activeTenantId;
-        tenantSelect.disabled = (role !== 'Superadmin' && role !== 'Admin');
+        tenantSelect.disabled = !isCallerSuperadmin;
       }
 
       document.getElementById('modal-user-title').textContent = `Edit Member: ${user.full_name}`;
@@ -2222,6 +2331,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (formItem) {
         formItem.addEventListener('submit', async (e) => {
           e.preventDefault();
+          const submitBtn = formItem.querySelector('button[type="submit"]');
+          const originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
+          if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span>Saving Item...</span>';
+          }
           try {
             const itemData = {
               id: document.getElementById('item-id').value || undefined,
@@ -2240,6 +2355,11 @@ document.addEventListener('DOMContentLoaded', () => {
             await this.refreshAllData();
           } catch (err) {
             this.showToast(`Error saving item: ${err.message}`, 'danger');
+          } finally {
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+            }
           }
         });
       }
@@ -2249,6 +2369,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (formIntake) {
         formIntake.addEventListener('submit', async (e) => {
           e.preventDefault();
+          const submitBtn = formIntake.querySelector('button[type="submit"]');
+          const originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
           try {
             const itemId = document.getElementById('intake-item-select').value;
             const location = document.getElementById('intake-location').value.trim().toUpperCase();
@@ -2257,6 +2379,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!itemId || !location || isNaN(qty) || qty <= 0) {
               return this.showToast('Please specify item, location, and a valid quantity.', 'warning');
+            }
+
+            if (submitBtn) {
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span>Processing Intake...</span>';
             }
 
             await window.WMSDataService.executeStockMovement({
@@ -2272,6 +2399,11 @@ document.addEventListener('DOMContentLoaded', () => {
             await this.refreshAllData();
           } catch (err) {
             this.showToast(`Intake error: ${err.message}`, 'danger');
+          } finally {
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+            }
           }
         });
       }
@@ -2281,6 +2413,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (formDispatch) {
         formDispatch.addEventListener('submit', async (e) => {
           e.preventDefault();
+          const submitBtn = formDispatch.querySelector('button[type="submit"]');
+          const originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
           try {
             const itemId = document.getElementById('dispatch-item-select').value;
             const location = document.getElementById('dispatch-location').value.trim().toUpperCase();
@@ -2289,6 +2423,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!itemId || !location || isNaN(qty) || qty <= 0) {
               return this.showToast('Please specify item, location, and a valid quantity.', 'warning');
+            }
+
+            if (submitBtn) {
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span>Processing Dispatch...</span>';
             }
 
             await window.WMSDataService.executeStockMovement({
@@ -2304,6 +2443,11 @@ document.addEventListener('DOMContentLoaded', () => {
             await this.refreshAllData();
           } catch (err) {
             this.showToast(`Dispatch error: ${err.message}`, 'danger');
+          } finally {
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+            }
           }
         });
       }
@@ -2313,6 +2457,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (formAdjust) {
         formAdjust.addEventListener('submit', async (e) => {
           e.preventDefault();
+          const submitBtn = formAdjust.querySelector('button[type="submit"]');
+          const originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
           try {
             const itemId = document.getElementById('adjust-item-select').value;
             const location = document.getElementById('adjust-location').value.trim().toUpperCase();
@@ -2321,6 +2467,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!itemId || !location || isNaN(actualQty) || actualQty < 0) {
               return this.showToast('Please provide valid count values.', 'warning');
+            }
+
+            if (submitBtn) {
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span>Adjusting Stock...</span>';
             }
 
             await window.WMSDataService.executeStockMovement({
@@ -2336,6 +2487,11 @@ document.addEventListener('DOMContentLoaded', () => {
             await this.refreshAllData();
           } catch (err) {
             this.showToast(`Adjustment error: ${err.message}`, 'danger');
+          } finally {
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+            }
           }
         });
       }
@@ -2345,6 +2501,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (formTransfer) {
         formTransfer.addEventListener('submit', async (e) => {
           e.preventDefault();
+          const submitBtn = formTransfer.querySelector('button[type="submit"]');
+          const originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
           try {
             const itemId = document.getElementById('transfer-item-select').value;
             const fromLocation = document.getElementById('transfer-from-location').value.trim().toUpperCase();
@@ -2354,6 +2512,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!itemId || !fromLocation || !toLocation || isNaN(qty) || qty <= 0) {
               return this.showToast('Please complete all transfer fields.', 'warning');
+            }
+
+            if (submitBtn) {
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span>Transferring...</span>';
             }
 
             await window.WMSDataService.transferStock({
@@ -2369,6 +2532,11 @@ document.addEventListener('DOMContentLoaded', () => {
             await this.refreshAllData();
           } catch (err) {
             this.showToast(`Transfer error: ${err.message}`, 'danger');
+          } finally {
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+            }
           }
         });
       }
@@ -2378,6 +2546,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (formUser) {
         formUser.addEventListener('submit', async (e) => {
           e.preventDefault();
+          const submitBtn = formUser.querySelector('button[type="submit"]');
+          const originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
           try {
             const userId = document.getElementById('user-id').value;
             const fullName = document.getElementById('user-fullname').value.trim();
@@ -2388,6 +2558,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const password = document.getElementById('user-password')?.value;
 
             if (userId) {
+              if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<span>Updating Member...</span>';
+              }
               await window.WMSDataService.updateUser(userId, {
                 full_name: fullName,
                 username: username,
@@ -2399,6 +2573,10 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
               if (!password || password.length < 6) {
                 return this.showToast('Please enter a password of at least 6 characters.', 'warning');
+              }
+              if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<span>Adding Member...</span>';
               }
               await window.WMSDataService.createUser({
                 username,
@@ -2415,6 +2593,11 @@ document.addEventListener('DOMContentLoaded', () => {
             await this.refreshAllData();
           } catch (err) {
             this.showToast(`Error saving member: ${err.message}`, 'danger');
+          } finally {
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+            }
           }
         });
       }
@@ -2510,6 +2693,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (formFacility) {
         formFacility.addEventListener('submit', async (e) => {
           e.preventDefault();
+          const submitBtn = formFacility.querySelector('button[type="submit"]');
+          const originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
           try {
             const name = document.getElementById('facility-name').value.trim();
             const id = document.getElementById('facility-id').value.trim().toLowerCase();
@@ -2519,6 +2704,11 @@ document.addEventListener('DOMContentLoaded', () => {
               return this.showToast('Please provide both a name and an ID code.', 'warning');
             }
 
+            if (submitBtn) {
+              submitBtn.disabled = true;
+              submitBtn.innerHTML = '<span>Creating Facility...</span>';
+            }
+
             await window.WMSDataService.upsertTenant({ id, name, is_active: isActive });
             this.closeModal('modal-facility');
             this.showToast(`Facility ${name} registered successfully!`, 'success');
@@ -2526,6 +2716,11 @@ document.addEventListener('DOMContentLoaded', () => {
             await this.refreshAllData();
           } catch (err) {
             this.showToast(`Error creating facility: ${err.message}`, 'danger');
+          } finally {
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+            }
           }
         });
       }
@@ -2779,8 +2974,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async handleDeleteItem(itemId) {
       const role = window.WMSDataService.currentUser?.role || this.currentUser?.role || 'User';
-      if (role !== 'Superadmin' && role !== 'Manager') {
-        return this.showToast('Permission Denied: Only Managers and Superadmins can delete catalog items.', 'warning');
+      if (role !== 'Superadmin' && role !== 'Admin' && role !== 'Manager') {
+        return this.showToast('Permission Denied: Only Admins, Managers, and Superadmins can delete catalog items.', 'warning');
       }
 
       const item = this.items.find(i => i.id === itemId);
@@ -2794,12 +2989,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     handleDeleteUser(userId) {
       const role = window.WMSDataService.currentUser?.role || this.currentUser?.role;
-      if (role !== 'Superadmin' && role !== 'Manager') {
-        return this.showToast('Permission Denied: Only Managers and Superadmins can manage members.', 'warning');
+      if (role !== 'Superadmin' && role !== 'Admin' && role !== 'Manager') {
+        return this.showToast('Permission Denied: Only Admins, Managers, and Superadmins can manage members.', 'warning');
       }
 
       const user = this.users.find(u => u.id === userId);
       if (!user) return;
+
+      if (role === 'Manager' && user.role !== 'User') {
+        return this.showToast('Managers can only delete standard User accounts.', 'warning');
+      }
+      if (role === 'Admin' && user.role === 'Superadmin') {
+        return this.showToast('Admins cannot delete Superadmin accounts.', 'warning');
+      }
+      if (user.id === (window.WMSDataService.currentUser?.id || this.currentUser?.id)) {
+        return this.showToast('You cannot delete your own account.', 'warning');
+      }
 
       const nameEl = document.getElementById('delete-user-confirm-name');
       const idEl = document.getElementById('delete-user-confirm-id');
