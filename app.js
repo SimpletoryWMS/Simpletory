@@ -2052,6 +2052,69 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         });
       });
+
+      // Auto-sync stock limit when user selects an item in Dispatch modal
+      const dispatchItemSelect = document.getElementById('dispatch-item-select');
+      const dispatchLocInput = document.getElementById('dispatch-location');
+      const dispatchQtyInput = document.getElementById('dispatch-qty');
+
+      const updateDispatchMaxQty = () => {
+        const itemId = dispatchItemSelect?.value;
+        const loc = (dispatchLocInput?.value || '').trim().toUpperCase();
+        if (!itemId) {
+          if (dispatchQtyInput) dispatchQtyInput.removeAttribute('max');
+          return;
+        }
+        const matchingInv = this.inventory.filter(i => i.item_id === itemId);
+        if (matchingInv.length > 0) {
+          if (dispatchLocInput && (!dispatchLocInput.value || dispatchLocInput.value === 'A-01-01')) {
+            dispatchLocInput.value = matchingInv[0].location;
+          }
+          const activeLoc = (dispatchLocInput?.value || '').trim().toUpperCase();
+          const targetRecord = matchingInv.find(i => i.location === activeLoc) || matchingInv[0];
+          if (dispatchQtyInput && Number(targetRecord.quantity) > 0) {
+            dispatchQtyInput.max = Number(targetRecord.quantity);
+          } else if (dispatchQtyInput) {
+            dispatchQtyInput.removeAttribute('max');
+          }
+        } else if (dispatchQtyInput) {
+          dispatchQtyInput.removeAttribute('max');
+        }
+      };
+
+      if (dispatchItemSelect) dispatchItemSelect.addEventListener('change', updateDispatchMaxQty);
+      if (dispatchLocInput) dispatchLocInput.addEventListener('input', updateDispatchMaxQty);
+
+      // Auto-sync stock limit when user selects an item in Transfer modal
+      const transferItemSelect = document.getElementById('transfer-item-select');
+      const transferFromLoc = document.getElementById('transfer-from-location');
+      const transferQtyInput = document.getElementById('transfer-qty');
+
+      const updateTransferMaxQty = () => {
+        const itemId = transferItemSelect?.value;
+        if (!itemId) {
+          if (transferQtyInput) transferQtyInput.removeAttribute('max');
+          return;
+        }
+        const matchingInv = this.inventory.filter(i => i.item_id === itemId);
+        if (matchingInv.length > 0) {
+          if (transferFromLoc && (!transferFromLoc.value || transferFromLoc.value === 'A-01-01')) {
+            transferFromLoc.value = matchingInv[0].location;
+          }
+          const activeLoc = (transferFromLoc?.value || '').trim().toUpperCase();
+          const targetRecord = matchingInv.find(i => i.location === activeLoc) || matchingInv[0];
+          if (transferQtyInput && Number(targetRecord.quantity) > 0) {
+            transferQtyInput.max = Number(targetRecord.quantity);
+          } else if (transferQtyInput) {
+            transferQtyInput.removeAttribute('max');
+          }
+        } else if (transferQtyInput) {
+          transferQtyInput.removeAttribute('max');
+        }
+      };
+
+      if (transferItemSelect) transferItemSelect.addEventListener('change', updateTransferMaxQty);
+      if (transferFromLoc) transferFromLoc.addEventListener('input', updateTransferMaxQty);
     },
 
     openModal(modalId) {
@@ -2093,7 +2156,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (locInput) locInput.value = location;
       if (qtyInput) {
         qtyInput.value = '';
-        qtyInput.max = maxQty;
+        if (Number(maxQty) > 0) {
+          qtyInput.max = Number(maxQty);
+        } else {
+          qtyInput.removeAttribute('max');
+        }
       }
       if (notesInput) notesInput.value = '';
 
@@ -2128,7 +2195,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (toInput) toInput.value = '';
       if (qtyInput) {
         qtyInput.value = '';
-        qtyInput.max = maxQty;
+        if (Number(maxQty) > 0) {
+          qtyInput.max = Number(maxQty);
+        } else {
+          qtyInput.removeAttribute('max');
+        }
       }
       if (notesInput) notesInput.value = '';
 

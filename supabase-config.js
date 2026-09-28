@@ -612,12 +612,62 @@
 
     async executeStockMovement({ itemId, location, actionType, quantityChange, notes }) {
       const tenantId = this.activeTenantId;
+
+      if (this.isSupabaseConnected && this.client) {
+        try {
+          const rpcParams = {
+            p_item_id: itemId,
+            p_location: location.trim().toUpperCase(),
+            p_action_type: actionType,
+            p_quantity_change: Number(quantityChange),
+            p_notes: notes || ''
+          };
+          if (tenantId) rpcParams.p_tenant_id = tenantId;
+
+          let res = await this.client.rpc('execute_stock_movement', rpcParams);
+          if (res.error && res.error.message && res.error.message.includes('schema cache')) {
+            // DB has 5-param signature deployed
+            delete rpcParams.p_tenant_id;
+            res = await this.client.rpc('execute_stock_movement', rpcParams);
+          }
+
+          if (res.error) throw res.error;
+          if (res.data && res.data.success === false) {
+            throw new Error(res.data.error || 'Failed to record stock movement.');
+          }
+          this.notifySubscribers('inventory');
+          this.notifySubscribers('inventory_history');
+          return res.data;
+        } catch (rpcErr) {
+          console.warn('RPC execute_stock_movement fallback to standard pipeline:', rpcErr);
+        }
+      }
+
       const items = await this.getItems(tenantId);
-      const targetItem = items.find(i => i.id === itemId);
-      if (!targetItem) throw new Error('Item not found in catalog.');
+      let targetItem = items.find(i => i.id === itemId);
+
+      if (!targetItem && this.isSupabaseConnected && this.client) {
+        try {
+          const { data: directItem } = await this.client
+            .from('items')
+            .select('*')
+            .eq('id', itemId)
+            .maybeSingle();
+          if (directItem) targetItem = directItem;
+        } catch (itemLookupErr) {
+          console.warn('Direct item lookup notice:', itemLookupErr);
+        }
+      }
+
+      if (!targetItem) {
+        const allLocal = this.getLocalDB().items || [];
+        targetItem = allLocal.find(i => i.id === itemId);
+      }
+
+      if (!targetItem) throw new Error('Item not found in catalog. Please verify that this SKU is created in this facility.');
 
       const inventories = await this.getInventory(tenantId);
-      let invRecord = inventories.find(inv => inv.item_id === itemId && inv.location === location);
+      let invRecord = inventories.find(inv => inv.item_id === itemId && inv.location === location.trim().toUpperCase());
 
       const previousQty = invRecord ? Number(invRecord.quantity) : 0;
       let newQty = previousQty;
@@ -660,10 +710,14 @@
       };
 
       if (this.isSupabaseConnected && this.client) {
-        const { error: invErr } = await this.client.from('inventory').upsert(updatedInv);
+        const { error: invErr } = await this.client
+          .from('inventory')
+          .upsert(updatedInv, { onConflict: 'tenant_id,item_id,location' });
         if (invErr) throw invErr;
         const { error: histErr } = await this.client.from('inventory_history').insert(historyLog);
         if (histErr) console.warn('History insert log notice:', histErr);
+        this.notifySubscribers('inventory');
+        this.notifySubscribers('inventory_history');
         return { inventory: updatedInv, history: historyLog };
       }
 
@@ -676,6 +730,8 @@
       }
       db.inventory_history.unshift(historyLog);
       this.setLocalDB(db);
+      this.notifySubscribers('inventory');
+      this.notifySubscribers('inventory_history');
 
       return { inventory: updatedInv, history: historyLog };
     }
