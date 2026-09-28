@@ -133,27 +133,27 @@
         try {
           clientToTest = window.supabase.createClient(customUrl.trim(), customKey.trim());
         } catch (e) {
-          return { success: false, message: `Invalid Supabase configuration: ${e.message}` };
+          return { success: false, message: `Invalid connection parameters: ${e.message}` };
         }
       }
 
       if (!clientToTest) {
-        return { success: false, message: 'No Supabase credentials configured.' };
+        return { success: false, message: 'No database credentials configured.' };
       }
 
       try {
         const { data, error } = await clientToTest.from('tenants').select('id').limit(1);
         if (error) {
           if (error.message && (error.message.includes('Failed to fetch') || error.message.includes('Load failed') || error.message.includes('NetworkError'))) {
-            return { success: false, message: 'Network Error: Could not reach the Supabase host URL. Please check the domain.' };
+            return { success: false, message: 'Failed to establish a connection. Please verify endpoint reachability.' };
           }
           return { success: false, message: `Database responded with error: ${error.message}` };
         }
-        return { success: true, message: 'Supabase connection verified active and responsive!' };
+        return { success: true, message: 'Database connection verified active and responsive.' };
       } catch (err) {
         const msg = err.message || '';
         if (msg.includes('Failed to fetch') || msg.includes('Load failed') || msg.includes('NetworkError')) {
-          return { success: false, message: 'Network Error: Could not connect to Supabase server. Please verify the URL.' };
+          return { success: false, message: 'Failed to establish a connection. Please verify endpoint reachability.' };
         }
         return { success: false, message: `Connection failed: ${msg}` };
       }
@@ -264,23 +264,20 @@
 
           if (authErr) {
             const errMsg = authErr.message || '';
-            if (errMsg.toLowerCase().includes('failed to fetch') || errMsg.toLowerCase().includes('load failed')) {
+            if (errMsg.toLowerCase().includes('failed to fetch') || errMsg.toLowerCase().includes('load failed') || errMsg.toLowerCase().includes('networkerror')) {
               return {
                 success: false,
-                error: 'Cannot reach Supabase database. Please click "Supabase Connection Settings" below to verify your Project URL and Anon API Key.'
+                error: 'Failed to establish a connection. Please check your network and try again.'
               };
             }
-            if (errMsg.toLowerCase().includes('invalid login credentials')) {
-              return {
-                success: false,
-                error: 'Invalid credentials. If this is a new setup, ensure you ran the schema & created your Superadmin account in the Supabase SQL Editor.'
-              };
-            }
-            return { success: false, error: errMsg };
+            return {
+              success: false,
+              error: 'Incorrect username or password.'
+            };
           }
 
           if (!authData || !authData.user) {
-            return { success: false, error: 'Authentication failed. Please verify credentials.' };
+            return { success: false, error: 'Incorrect username or password.' };
           }
 
           // 3. Fetch User Profile
@@ -348,7 +345,11 @@
           return { success: true, user: profile };
         } catch (err) {
           console.error('Authentication error:', err);
-          return { success: false, error: `Authentication failed: ${err.message}` };
+          const msg = (err && err.message) || '';
+          if (msg.toLowerCase().includes('failed to fetch') || msg.toLowerCase().includes('load failed') || msg.toLowerCase().includes('networkerror')) {
+            return { success: false, error: 'Failed to establish a connection. Please check your network and try again.' };
+          }
+          return { success: false, error: 'Incorrect username or password.' };
         }
       }
 
@@ -364,7 +365,7 @@
       );
 
       if (!user) {
-        return { success: false, error: `User '${cleanUsername}' not found in local store.` };
+        return { success: false, error: 'Incorrect username or password.' };
       }
 
       if (user.status === 'Suspended') {

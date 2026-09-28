@@ -1762,56 +1762,6 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
           </button>
         </form>
-
-        <!-- Database Connection Settings Footer -->
-        <div class="auth-card-footer" style="margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 0.75rem; align-items: center;">
-          <button type="button" class="btn btn-secondary btn-sm" id="btn-open-db-config" style="width: 100%; font-size: 0.82rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem; padding: 0.55rem;">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            <span>Supabase Connection Settings</span>
-          </button>
-          <div id="auth-connection-status" style="font-size: 0.76rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.4rem;">
-            <span class="status-dot" id="auth-status-dot" style="width: 7px; height: 7px; border-radius: 50%; background: var(--warning); display: inline-block;"></span>
-            <span id="auth-status-text">Checking Database Link...</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Modal: Supabase Connection Settings (Accessible from Login & In-App) -->
-  <div class="modal-overlay" id="modal-auth-supabase-config">
-    <div class="modal-container" style="max-width: 520px;">
-      <div class="modal-header">
-        <div class="modal-title">Supabase Database Connection</div>
-        <button type="button" class="modal-close" onclick="App.closeModal('modal-auth-supabase-config')">✕</button>
-      </div>
-      <div class="modal-body">
-        <p style="font-size: 0.84rem; color: var(--text-secondary); margin-bottom: 1.25rem; line-height: 1.5;">
-          Connect your live Supabase project to enable real-time multi-tenant sync and cryptographic authentication. Find these credentials in your <strong>Supabase Dashboard ➔ Project Settings ➔ API</strong>.
-        </p>
-
-        <div id="modal-db-alert" class="auth-alert" style="display: none; margin-bottom: 1rem;"></div>
-
-        <div class="form-group">
-          <label class="form-label" for="auth-setting-url">Supabase Project URL</label>
-          <input type="text" class="form-input" id="auth-setting-url" placeholder="https://your-project-ref.supabase.co" spellcheck="false">
-          <span class="form-hint">Example: https://abcdefghijklm.supabase.co</span>
-        </div>
-
-        <div class="form-group" style="margin-top: 1rem;">
-          <label class="form-label" for="auth-setting-key">Supabase Anon Public API Key</label>
-          <input type="password" class="form-input" id="auth-setting-key" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." spellcheck="false">
-          <span class="form-hint">Project Settings ➔ API ➔ Project API Keys (anon public)</span>
-        </div>
-      </div>
-      <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
-        <button type="button" class="btn btn-secondary btn-sm" id="btn-auth-test-db">
-          <span>Test Connection</span>
-        </button>
-        <div style="display: flex; gap: 0.5rem;">
-          <button type="button" class="btn btn-secondary btn-sm" onclick="App.closeModal('modal-auth-supabase-config')">Cancel</button>
-          <button type="button" class="btn btn-primary btn-sm" id="btn-auth-save-db">Save & Connect</button>
-        </div>
       </div>
     </div>
   </div>

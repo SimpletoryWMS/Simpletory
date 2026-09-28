@@ -183,100 +183,6 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         });
       }
-
-      // Supabase Connection Settings Modal & Trigger (on Login Screen)
-      const btnOpenDbConfig = document.getElementById('btn-open-db-config');
-      const btnAuthTestDb = document.getElementById('btn-auth-test-db');
-      const btnAuthSaveDb = document.getElementById('btn-auth-save-db');
-      const modalDbAlert = document.getElementById('modal-db-alert');
-      const authUrlInput = document.getElementById('auth-setting-url');
-      const authKeyInput = document.getElementById('auth-setting-key');
-
-      if (btnOpenDbConfig) {
-        btnOpenDbConfig.addEventListener('click', () => {
-          const cfg = window.WMSDataService.getSavedConfig() || {};
-          if (authUrlInput) authUrlInput.value = cfg.url || '';
-          if (authKeyInput) authKeyInput.value = cfg.key || '';
-          if (modalDbAlert) modalDbAlert.style.display = 'none';
-          this.openModal('modal-auth-supabase-config');
-        });
-      }
-
-      if (btnAuthTestDb) {
-        btnAuthTestDb.addEventListener('click', async () => {
-          const url = authUrlInput ? authUrlInput.value.trim() : '';
-          const key = authKeyInput ? authKeyInput.value.trim() : '';
-          if (!url || !key) {
-            if (modalDbAlert) {
-              modalDbAlert.textContent = 'Please enter both your Supabase URL and Anon API key to test.';
-              modalDbAlert.style.display = 'block';
-              modalDbAlert.style.background = 'var(--danger-light)';
-              modalDbAlert.style.borderColor = 'var(--danger-border)';
-              modalDbAlert.style.color = '#f28b82';
-            }
-            return;
-          }
-          btnAuthTestDb.disabled = true;
-          btnAuthTestDb.textContent = 'Testing...';
-          const testRes = await window.WMSDataService.testConnection(url, key);
-          btnAuthTestDb.disabled = false;
-          btnAuthTestDb.textContent = 'Test Connection';
-
-          if (modalDbAlert) {
-            modalDbAlert.textContent = testRes.message;
-            modalDbAlert.style.display = 'block';
-            if (testRes.success) {
-              modalDbAlert.style.background = 'var(--success-light)';
-              modalDbAlert.style.borderColor = 'var(--success-border)';
-              modalDbAlert.style.color = '#81c995';
-            } else {
-              modalDbAlert.style.background = 'var(--danger-light)';
-              modalDbAlert.style.borderColor = 'var(--danger-border)';
-              modalDbAlert.style.color = '#f28b82';
-            }
-          }
-        });
-      }
-
-      if (btnAuthSaveDb) {
-        btnAuthSaveDb.addEventListener('click', async () => {
-          const url = authUrlInput ? authUrlInput.value.trim() : '';
-          const key = authKeyInput ? authKeyInput.value.trim() : '';
-          const res = window.WMSDataService.saveConfig(url, key);
-          if (res.success) {
-            const settingUrl = document.getElementById('setting-supabase-url');
-            const settingKey = document.getElementById('setting-supabase-key');
-            if (settingUrl) settingUrl.value = url;
-            if (settingKey) settingKey.value = key;
-            this.showToast('Supabase connection saved & activated!', 'success');
-            this.closeModal('modal-auth-supabase-config');
-            this.updateAuthConnectionStatus();
-            this.updateSyncIndicator();
-          } else {
-            if (modalDbAlert) {
-              modalDbAlert.textContent = `Error saving configuration: ${res.error}`;
-              modalDbAlert.style.display = 'block';
-            }
-          }
-        });
-      }
-
-      this.updateAuthConnectionStatus();
-    },
-
-    updateAuthConnectionStatus() {
-      const dot = document.getElementById('auth-status-dot');
-      const text = document.getElementById('auth-status-text');
-      if (!dot || !text) return;
-
-      const cfg = window.WMSDataService.getSavedConfig();
-      if (!cfg || !cfg.url || cfg.url.includes('wuxdffvkyxsqdmsnfkye')) {
-        dot.style.background = 'var(--warning)';
-        text.textContent = 'Supabase Project Not Configured (Click settings above)';
-      } else {
-        dot.style.background = 'var(--success)';
-        text.textContent = `Live Database: ${cfg.url.replace(/^https?:\/\//, '').split('.')[0]}.supabase.co`;
-      }
     },
 
     bindUserProfileMenu() {
@@ -496,7 +402,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Guard locked views
       if (viewName === 'settings' && !isSuperadmin) {
-        return this.showToast('Access Denied: Settings & Supabase connection is restricted to Superadmin.', 'danger');
+        return this.showToast('Access Denied: System settings are restricted to Superadmin.', 'danger');
       }
       if (viewName === 'users' && !isManager) {
         return this.showToast('Access Denied: Team management is restricted to Managers and Superadmins.', 'warning');
@@ -2551,10 +2457,10 @@ document.addEventListener('DOMContentLoaded', () => {
           const key = document.getElementById('setting-supabase-key').value;
           const res = window.WMSDataService.saveConfig(url, key);
           if (res.success) {
-            this.showToast('Testing Supabase connection...', 'info');
+            this.showToast('Testing database connection...', 'info');
             const testRes = await window.WMSDataService.testConnection();
             if (testRes.success) {
-              this.showToast('Connected to Supabase live database successfully!', 'success');
+              this.showToast('Connected to live database successfully!', 'success');
             } else {
               this.showToast(`Saved, but ${testRes.message}`, 'warning');
             }
