@@ -286,7 +286,8 @@ CREATE OR REPLACE FUNCTION public.execute_stock_movement(
     p_location TEXT,
     p_action_type TEXT,
     p_quantity_change NUMERIC,
-    p_notes TEXT DEFAULT NULL
+    p_notes TEXT DEFAULT NULL,
+    p_tenant_id TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -296,6 +297,7 @@ AS $$
 DECLARE
     v_caller_role TEXT;
     v_caller_tenant TEXT;
+    v_target_tenant TEXT;
     v_caller_name TEXT;
     v_sku TEXT;
     v_item_name TEXT;
@@ -310,9 +312,15 @@ DECLARE
     v_action TEXT := UPPER(TRIM(p_action_type));
     v_clean_notes TEXT;
 BEGIN
-    -- 1. Identify Caller & Facility
+    -- 1. Identify Caller & Facility Context
     v_caller_role := public.get_auth_role();
     v_caller_tenant := public.get_auth_tenant_id();
+    v_target_tenant := COALESCE(NULLIF(TRIM(p_tenant_id), ''), v_caller_tenant);
+
+    -- Multi-facility authorization guard: Only Superadmins can operate across arbitrary facilities
+    IF v_caller_role <> 'Superadmin' AND v_target_tenant <> v_caller_tenant THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Permission denied: Cannot perform stock operations outside your assigned facility.');
+    END IF;
 
     SELECT full_name INTO v_caller_name 
     FROM public.users 
@@ -321,11 +329,11 @@ BEGIN
 
     v_caller_name := COALESCE(v_caller_name, auth.jwt()->'user_metadata'->>'full_name', 'Warehouse Staff');
 
-    -- 2. Lookup Item in Caller's Tenant (or Superadmin scope)
+    -- 2. Lookup Item in Target Facility (or Global Catalog for Superadmin)
     SELECT sku, name, COALESCE(reorder_point, 0.00)
     INTO v_sku, v_item_name, v_reorder_point
     FROM public.items 
-    WHERE id = p_item_id AND (tenant_id = v_caller_tenant OR v_caller_role = 'Superadmin');
+    WHERE id = p_item_id AND (tenant_id = v_target_tenant OR v_caller_role = 'Superadmin');
 
     IF NOT FOUND THEN
         RETURN jsonb_build_object('success', false, 'error', 'Catalog item not found in your facility.');
@@ -334,7 +342,7 @@ BEGIN
     -- 3. Row-Lock Existing Inventory for Atomic Consistency
     SELECT id, quantity INTO v_inv_id, v_prev_qty
     FROM public.inventory
-    WHERE tenant_id = v_caller_tenant AND item_id = p_item_id AND location = v_loc
+    WHERE tenant_id = v_target_tenant AND item_id = p_item_id AND location = v_loc
     FOR UPDATE;
 
     v_prev_qty := COALESCE(v_prev_qty, 0.00);
@@ -367,7 +375,7 @@ BEGIN
 
     -- 6. Atomic Upsert to public.inventory
     INSERT INTO public.inventory (id, tenant_id, item_id, location, quantity, status, updated_at)
-    VALUES (v_inv_id, v_caller_tenant, p_item_id, v_loc, v_new_qty, v_status, NOW())
+    VALUES (v_inv_id, v_target_tenant, p_item_id, v_loc, v_new_qty, v_status, NOW())
     ON CONFLICT (tenant_id, item_id, location) 
     DO UPDATE SET 
         quantity = EXCLUDED.quantity,
@@ -382,19 +390,19 @@ BEGIN
         id, tenant_id, item_id, sku, item_name, action_type,
         qty_change, previous_qty, new_qty, location, user_name, notes, created_at
     ) VALUES (
-        v_hist_id, v_caller_tenant, p_item_id, v_sku, v_item_name, v_action,
+        v_hist_id, v_target_tenant, p_item_id, v_sku, v_item_name, v_action,
         v_calc_change, v_prev_qty, v_new_qty, v_loc, v_caller_name, v_clean_notes, NOW()
     );
 
     RETURN jsonb_build_object(
         'success', true,
-        'inventory', jsonb_build_object('id', v_inv_id, 'tenant_id', v_caller_tenant, 'item_id', p_item_id, 'location', v_loc, 'quantity', v_new_qty, 'status', v_status),
+        'inventory', jsonb_build_object('id', v_inv_id, 'tenant_id', v_target_tenant, 'item_id', p_item_id, 'location', v_loc, 'quantity', v_new_qty, 'status', v_status),
         'history', jsonb_build_object('id', v_hist_id, 'sku', v_sku, 'item_name', v_item_name, 'action_type', v_action, 'qty_change', v_calc_change, 'previous_qty', v_prev_qty, 'new_qty', v_new_qty, 'location', v_loc, 'user_name', v_caller_name, 'notes', v_clean_notes)
     );
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.execute_stock_movement(TEXT, TEXT, TEXT, NUMERIC, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.execute_stock_movement(TEXT, TEXT, TEXT, NUMERIC, TEXT, TEXT) TO authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 5. Granular Catalog Master RLS Policies (public.items)
