@@ -25,6 +25,7 @@ document.addEventListener('DOMContentLoaded', () => {
       this.bindModals();
       this.bindForms();
       this.bindGlobalActions();
+      this.bindTableDelegations();
       this.bindShortcuts();
       this.bindHelpCenter();
       this.bindUserProfileMenu();
@@ -500,7 +501,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <td><span class="badge ${statusBadge}">${statusText}</span></td>
             <td style="color: var(--text-muted); font-size: 0.8rem;">${t.created_at ? new Date(t.created_at).toLocaleDateString() : 'Initial'}</td>
             <td style="text-align: right;">
-              <button class="btn ${btnClass} btn-sm" onclick="App.toggleTenant('${this.escapeAttr(t.id)}', ${!isActive})">
+              <button class="btn ${btnClass} btn-sm" data-action="toggle-tenant" data-tenant-id="${this.escapeAttr(t.id)}" data-new-status="${!isActive}">
                 ${btnText}
               </button>
             </td>
@@ -704,9 +705,9 @@ document.addEventListener('DOMContentLoaded', () => {
             <td><span class="location-tag">${this.escapeHtml(inv.location)}</span></td>
             <td>
               <div class="qty-stepper-cell">
-                <button class="qty-stepper-btn btn-minus" title="Subtract stock (-)" onclick="App.openQuickDispatch('${safeItemId}', '${safeLocation}', ${safeQty})">−</button>
+                <button class="qty-stepper-btn btn-minus" title="Subtract stock (-)" data-action="quick-dispatch" data-item-id="${safeItemId}" data-location="${safeLocation}" data-qty="${safeQty}">−</button>
                 <strong style="font-size: 0.95rem; min-width: 28px; text-align: center;">${safeQty}</strong>
-                <button class="qty-stepper-btn btn-plus" title="Add stock (+)" onclick="App.openQuickIntake('${safeItemId}', '${safeLocation}')">+</button>
+                <button class="qty-stepper-btn btn-plus" title="Add stock (+)" data-action="quick-intake" data-item-id="${safeItemId}" data-location="${safeLocation}">+</button>
               </div>
             </td>
             <td><span style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">${this.escapeHtml(item.uom)}</span></td>
@@ -715,16 +716,16 @@ document.addEventListener('DOMContentLoaded', () => {
             <td><span class="badge ${statusBadge}">${this.escapeHtml(inv.status)}</span></td>
             <td>
               <div class="table-actions">
-                <button class="action-btn action-btn-add" title="Quick Add (+)" onclick="App.openQuickIntake('${safeItemId}', '${safeLocation}')">
+                <button class="action-btn action-btn-add" title="Quick Add (+)" data-action="quick-intake" data-item-id="${safeItemId}" data-location="${safeLocation}">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14m-7-7h14"/></svg> + Add
                 </button>
-                <button class="action-btn action-btn-sub" title="Quick Subtract (-)" onclick="App.openQuickDispatch('${safeItemId}', '${safeLocation}', ${safeQty})">
+                <button class="action-btn action-btn-sub" title="Quick Subtract (-)" data-action="quick-dispatch" data-item-id="${safeItemId}" data-location="${safeLocation}" data-qty="${safeQty}">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14"/></svg> − Subtract
                 </button>
-                <button class="action-btn" title="Transfer Location" onclick="App.openTransferModal('${safeItemId}', '${safeLocation}', ${safeQty})">
+                <button class="action-btn" title="Transfer Location" data-action="transfer-modal" data-item-id="${safeItemId}" data-location="${safeLocation}" data-qty="${safeQty}">
                   ⇄ Move
                 </button>
-                <button class="action-btn" title="Audit Count / Adjust" onclick="App.openAdjustModal('${safeItemId}', '${safeLocation}', ${safeQty})">
+                <button class="action-btn" title="Audit Count / Adjust" data-action="adjust-modal" data-item-id="${safeItemId}" data-location="${safeLocation}" data-qty="${safeQty}">
                   ⚙ Adjust
                 </button>
               </div>
@@ -765,8 +766,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const safeItemId = this.escapeAttr(item.id);
         const actionsHtml = canManage ? `
           <div class="table-actions">
-            <button class="action-btn" title="Edit SKU" onclick="App.openEditItemModal('${safeItemId}')">✏ Edit</button>
-            <button class="action-btn" style="color: var(--danger);" title="Delete" onclick="App.handleDeleteItem('${safeItemId}')">🗑</button>
+            <button class="action-btn" title="Edit SKU" data-action="edit-item" data-item-id="${safeItemId}">✏ Edit</button>
+            <button class="action-btn" style="color: var(--danger);" title="Delete" data-action="delete-item" data-item-id="${safeItemId}">🗑</button>
           </div>
         ` : `<span class="badge badge-neutral">Read Only</span>`;
 
@@ -872,8 +873,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const actionsHtml = canManageUser ? `
           <div class="table-actions">
-            <button class="action-btn" onclick="App.openEditUserModal('${safeUserId}')">✏ Edit</button>
-            <button class="action-btn" style="color: var(--danger);" onclick="App.handleDeleteUser('${safeUserId}')">🗑</button>
+            <button class="action-btn" data-action="edit-user" data-user-id="${safeUserId}">✏ Edit</button>
+            <button class="action-btn" style="color: var(--danger);" data-action="delete-user" data-user-id="${safeUserId}">🗑</button>
           </div>
         ` : `<span class="badge badge-neutral">Read Only</span>`;
 
@@ -1960,6 +1961,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // DROPDOWNS & FILTER OPTIONS POPULATOR
     // ==========================================
     populateDropdowns() {
+      const updateSelectPreservingValue = (selectEl, newHtml) => {
+        if (!selectEl) return;
+        const previousVal = selectEl.value;
+        selectEl.innerHTML = newHtml;
+        if (previousVal && Array.from(selectEl.options).some(o => o.value === previousVal)) {
+          selectEl.value = previousVal;
+        }
+      };
+
       // Collect unique categories
       const categories = Array.from(new Set(this.items.map(i => i.category || 'General'))).sort();
       const catOptions = `<option value="">All Categories</option>` + categories.map(c => `<option value="${this.escapeAttr(c)}">${this.escapeHtml(c)}</option>`).join('');
@@ -1967,12 +1977,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const invCatSelect = document.getElementById('inventory-category-filter');
       const itemCatSelect = document.getElementById('items-category-filter');
       const repCatSelect = document.getElementById('report-category-filter');
-      if (invCatSelect) invCatSelect.innerHTML = catOptions;
-      if (itemCatSelect) itemCatSelect.innerHTML = catOptions;
+      updateSelectPreservingValue(invCatSelect, catOptions);
+      updateSelectPreservingValue(itemCatSelect, catOptions);
       if (repCatSelect) {
         const curVal = repCatSelect.value || 'ALL';
         repCatSelect.innerHTML = `<option value="ALL">All Categories</option>` + categories.map(c => `<option value="${this.escapeAttr(c)}">${this.escapeHtml(c)}</option>`).join('');
-        if (categories.includes(curVal)) repCatSelect.value = curVal;
+        if (categories.includes(curVal) || curVal === 'ALL') repCatSelect.value = curVal;
       }
 
       // Populate item selects in modals
@@ -1983,10 +1993,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const adjustItemSelect = document.getElementById('adjust-item-select');
       const transferItemSelect = document.getElementById('transfer-item-select');
 
-      if (intakeItemSelect) intakeItemSelect.innerHTML = itemOptions;
-      if (dispatchItemSelect) dispatchItemSelect.innerHTML = itemOptions;
-      if (adjustItemSelect) adjustItemSelect.innerHTML = itemOptions;
-      if (transferItemSelect) transferItemSelect.innerHTML = itemOptions;
+      updateSelectPreservingValue(intakeItemSelect, itemOptions);
+      updateSelectPreservingValue(dispatchItemSelect, itemOptions);
+      updateSelectPreservingValue(adjustItemSelect, itemOptions);
+      updateSelectPreservingValue(transferItemSelect, itemOptions);
     },
 
     // ==========================================
@@ -2972,6 +2982,70 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     },
 
+    bindTableDelegations() {
+      // 1. Inventory Table Delegated Actions
+      const invTbody = document.getElementById('inventory-table-body');
+      if (invTbody && !invTbody.dataset.delegated) {
+        invTbody.dataset.delegated = 'true';
+        invTbody.addEventListener('click', (e) => {
+          const btn = e.target.closest('button[data-action]');
+          if (!btn) return;
+          const action = btn.getAttribute('data-action');
+          const itemId = btn.getAttribute('data-item-id');
+          const location = btn.getAttribute('data-location');
+          const qty = Number(btn.getAttribute('data-qty')) || 0;
+
+          if (action === 'quick-intake') this.openQuickIntake(itemId, location);
+          else if (action === 'quick-dispatch') this.openQuickDispatch(itemId, location, qty);
+          else if (action === 'transfer-modal') this.openTransferModal(itemId, location, qty);
+          else if (action === 'adjust-modal') this.openAdjustModal(itemId, location, qty);
+        });
+      }
+
+      // 2. Catalog Items Table Delegated Actions
+      const itemsTbody = document.getElementById('items-table-body');
+      if (itemsTbody && !itemsTbody.dataset.delegated) {
+        itemsTbody.dataset.delegated = 'true';
+        itemsTbody.addEventListener('click', (e) => {
+          const btn = e.target.closest('button[data-action]');
+          if (!btn) return;
+          const action = btn.getAttribute('data-action');
+          const itemId = btn.getAttribute('data-item-id');
+
+          if (action === 'edit-item') this.openEditItemModal(itemId);
+          else if (action === 'delete-item') this.handleDeleteItem(itemId);
+        });
+      }
+
+      // 3. Users Table Delegated Actions
+      const usersTbody = document.getElementById('users-table-body');
+      if (usersTbody && !usersTbody.dataset.delegated) {
+        usersTbody.dataset.delegated = 'true';
+        usersTbody.addEventListener('click', (e) => {
+          const btn = e.target.closest('button[data-action]');
+          if (!btn) return;
+          const action = btn.getAttribute('data-action');
+          const userId = btn.getAttribute('data-user-id');
+
+          if (action === 'edit-user') this.openEditUserModal(userId);
+          else if (action === 'delete-user') this.handleDeleteUser(userId);
+        });
+      }
+
+      // 4. Facilities / Tenants Table Delegated Actions
+      const tenantsTbody = document.getElementById('table-tenants-body');
+      if (tenantsTbody && !tenantsTbody.dataset.delegated) {
+        tenantsTbody.dataset.delegated = 'true';
+        tenantsTbody.addEventListener('click', (e) => {
+          const btn = e.target.closest('button[data-action="toggle-tenant"]');
+          if (!btn) return;
+          const tenantId = btn.getAttribute('data-tenant-id');
+          const newStatus = btn.getAttribute('data-new-status') === 'true';
+          this.toggleTenant(tenantId, newStatus);
+        });
+      }
+    },
+
     async handleDeleteItem(itemId) {
       const role = window.WMSDataService.currentUser?.role || this.currentUser?.role || 'User';
       if (role !== 'Superadmin' && role !== 'Admin' && role !== 'Manager') {
@@ -2980,7 +3054,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const item = this.items.find(i => i.id === itemId);
       if (!item) return;
-      if (confirm(`Are you sure you want to delete SKU "${item.sku}"? This will also remove associated inventory records.`)) {
+      if (confirm(`Are you sure you want to delete SKU "${item.sku}"? This will remove its catalog entry and active balances while keeping past audit transaction history permanently preserved.`)) {
         await window.WMSDataService.deleteItem(itemId);
         this.showToast(`Deleted SKU: ${item.sku}`, 'info');
         await this.refreshAllData();
@@ -3044,13 +3118,19 @@ document.addEventListener('DOMContentLoaded', () => {
         return this.showToast('No data available to export.', 'warning');
       }
       const headers = Object.keys(dataArray[0]);
+
+      // Sanitize formula injection triggers (=, +, -, @, tab, newline)
+      const sanitizeCsvCell = (val) => {
+        let str = String(val ?? '');
+        if (/^[=+\-@\t\r]/.test(str)) {
+          str = "'" + str;
+        }
+        return `"${str.replace(/"/g, '""')}"`;
+      };
+
       const csvRows = [
-        headers.map(h => `"${String(h).replace(/"/g, '""')}"`).join(','),
-        ...dataArray.map(row => headers.map(fieldName => {
-          let val = row[fieldName] ?? '';
-          val = String(val).replace(/"/g, '""');
-          return `"${val}"`;
-        }).join(','))
+        headers.map(h => sanitizeCsvCell(h)).join(','),
+        ...dataArray.map(row => headers.map(fieldName => sanitizeCsvCell(row[fieldName])).join(','))
       ];
       const blob = new Blob(['\uFEFF' + csvRows.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);

@@ -126,14 +126,14 @@ CREATE TABLE IF NOT EXISTS public.inventory (
     CONSTRAINT uq_tenant_item_location UNIQUE (tenant_id, item_id, location)
 );
 
--- 5. Inventory Change History / Audit Log Table
+-- 5. Inventory Change History / Audit Log Table (Immutable Ledger)
 CREATE TABLE IF NOT EXISTS public.inventory_history (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
-    item_id TEXT NOT NULL REFERENCES public.items(id) ON DELETE CASCADE,
+    item_id TEXT REFERENCES public.items(id) ON DELETE SET NULL,
     sku TEXT NOT NULL,
     item_name TEXT NOT NULL,
-    action_type TEXT NOT NULL, -- 'ADD', 'SUBTRACT', 'ADJUST', 'TRANSFER', 'DELETE'
+    action_type TEXT NOT NULL, -- 'ADD', 'SUBTRACT', 'ADJUST', 'TRANSFER_OUT', 'TRANSFER_IN', 'DELETE'
     qty_change NUMERIC(12, 2) NOT NULL,
     previous_qty NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
     new_qty NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
@@ -207,11 +207,17 @@ BEGIN
 
     v_prev_qty := COALESCE(v_prev_qty, 0.00);
 
-    -- 4. Calculate New Stock
+    -- 4. Calculate New Stock with Insufficient Stock Guard
     IF v_action = 'ADD' THEN
         v_new_qty := v_prev_qty + ABS(p_quantity_change);
     ELSIF v_action = 'SUBTRACT' THEN
-        v_new_qty := GREATEST(0.00, v_prev_qty - ABS(p_quantity_change));
+        IF v_prev_qty < ABS(p_quantity_change) THEN
+            RETURN jsonb_build_object(
+                'success', false, 
+                'error', format('Insufficient stock at location %s: Available %s, requested %s.', v_loc, v_prev_qty, ABS(p_quantity_change))
+            );
+        END IF;
+        v_new_qty := v_prev_qty - ABS(p_quantity_change);
     ELSIF v_action = 'ADJUST' THEN
         v_new_qty := GREATEST(0.00, p_quantity_change);
     ELSE
@@ -262,7 +268,152 @@ BEGIN
 END;
 $$;
 
+-- Atomic Stock Transfer Stored Procedure (Single ACID Transaction)
+CREATE OR REPLACE FUNCTION public.execute_stock_transfer(
+    p_item_id TEXT,
+    p_from_location TEXT,
+    p_to_location TEXT,
+    p_quantity NUMERIC,
+    p_notes TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth, pg_temp
+AS $$
+DECLARE
+    v_caller_role TEXT;
+    v_caller_tenant TEXT;
+    v_caller_name TEXT;
+    v_sku TEXT;
+    v_item_name TEXT;
+    v_reorder_point NUMERIC(12, 2);
+    v_from_loc TEXT := UPPER(TRIM(p_from_location));
+    v_to_loc TEXT := UPPER(TRIM(p_to_location));
+    v_qty NUMERIC(12, 2) := ABS(p_quantity);
+    
+    v_from_inv_id TEXT;
+    v_from_prev_qty NUMERIC(12, 2) := 0.00;
+    v_from_new_qty NUMERIC(12, 2) := 0.00;
+    v_from_status TEXT;
+
+    v_to_inv_id TEXT;
+    v_to_prev_qty NUMERIC(12, 2) := 0.00;
+    v_to_new_qty NUMERIC(12, 2) := 0.00;
+    v_to_status TEXT;
+
+    v_hist_out_id TEXT;
+    v_hist_in_id TEXT;
+    v_clean_notes TEXT;
+BEGIN
+    IF v_qty <= 0 THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Transfer quantity must be greater than zero.');
+    END IF;
+
+    IF v_from_loc = v_to_loc THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Source and destination locations cannot be identical.');
+    END IF;
+
+    -- 1. Identify Caller & Facility
+    v_caller_role := public.get_auth_role();
+    v_caller_tenant := public.get_auth_tenant_id();
+
+    SELECT full_name INTO v_caller_name 
+    FROM public.users 
+    WHERE id::text = auth.uid()::text OR email = auth.jwt()->>'email'
+    LIMIT 1;
+
+    v_caller_name := COALESCE(v_caller_name, 'Warehouse Staff');
+
+    -- 2. Lookup Catalog Item
+    SELECT sku, name, COALESCE(reorder_point, 0.00), tenant_id
+    INTO v_sku, v_item_name, v_reorder_point, v_caller_tenant
+    FROM public.items 
+    WHERE id = p_item_id AND (tenant_id = v_caller_tenant OR v_caller_role = 'Superadmin');
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Catalog item not found in your facility.');
+    END IF;
+
+    -- 3. Lock & Verify Source Location Inventory
+    SELECT id, quantity INTO v_from_inv_id, v_from_prev_qty
+    FROM public.inventory
+    WHERE tenant_id = v_caller_tenant AND item_id = p_item_id AND location = v_from_loc
+    FOR UPDATE;
+
+    v_from_prev_qty := COALESCE(v_from_prev_qty, 0.00);
+
+    IF v_from_prev_qty < v_qty THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', format('Insufficient stock at source location %s: Available %s, requested transfer %s.', v_from_loc, v_from_prev_qty, v_qty)
+        );
+    END IF;
+
+    v_from_new_qty := v_from_prev_qty - v_qty;
+    v_from_status := CASE WHEN v_from_new_qty <= 0 THEN 'Out of Stock' WHEN v_from_new_qty <= v_reorder_point THEN 'Low Stock' ELSE 'Available' END;
+
+    -- 4. Lock & Update Destination Location Inventory
+    SELECT id, quantity INTO v_to_inv_id, v_to_prev_qty
+    FROM public.inventory
+    WHERE tenant_id = v_caller_tenant AND item_id = p_item_id AND location = v_to_loc
+    FOR UPDATE;
+
+    v_to_prev_qty := COALESCE(v_to_prev_qty, 0.00);
+    v_to_new_qty := v_to_prev_qty + v_qty;
+    v_to_status := CASE WHEN v_to_new_qty <= 0 THEN 'Out of Stock' WHEN v_to_new_qty <= v_reorder_point THEN 'Low Stock' ELSE 'Available' END;
+
+    -- 5. Apply Updates to Source & Destination
+    UPDATE public.inventory
+    SET quantity = v_from_new_qty, status = v_from_status, updated_at = NOW()
+    WHERE id = v_from_inv_id;
+
+    IF v_to_inv_id IS NOT NULL THEN
+        UPDATE public.inventory
+        SET quantity = v_to_new_qty, status = v_to_status, updated_at = NOW()
+        WHERE id = v_to_inv_id;
+    ELSE
+        v_to_inv_id := 'inv-' || floor(extract(epoch from now()) * 1000)::text || '-' || substr(md5(random()::text), 1, 4);
+        INSERT INTO public.inventory (id, tenant_id, item_id, location, quantity, status, updated_at)
+        VALUES (v_to_inv_id, v_caller_tenant, p_item_id, v_to_loc, v_to_new_qty, v_to_status, NOW());
+    END IF;
+
+    -- 6. Insert Historical Audit Trail for Transfer
+    v_clean_notes := COALESCE(TRIM(p_notes), 'Stock transfer: ' || v_from_loc || ' -> ' || v_to_loc);
+    v_hist_out_id := 'hist-' || floor(extract(epoch from now()) * 1000)::text || '-' || substr(md5(random()::text), 1, 4);
+    v_hist_in_id := 'hist-' || (floor(extract(epoch from now()) * 1000) + 1)::text || '-' || substr(md5(random()::text), 1, 4);
+
+    -- Transfer Out Entry
+    INSERT INTO public.inventory_history (
+        id, tenant_id, item_id, sku, item_name, action_type,
+        qty_change, previous_qty, new_qty, location, user_name, notes, created_at
+    ) VALUES (
+        v_hist_out_id, v_caller_tenant, p_item_id, v_sku, v_item_name, 'TRANSFER_OUT',
+        -v_qty, v_from_prev_qty, v_from_new_qty, v_from_loc, v_caller_name, v_clean_notes, NOW()
+    );
+
+    -- Transfer In Entry
+    INSERT INTO public.inventory_history (
+        id, tenant_id, item_id, sku, item_name, action_type,
+        qty_change, previous_qty, new_qty, location, user_name, notes, created_at
+    ) VALUES (
+        v_hist_in_id, v_caller_tenant, p_item_id, v_sku, v_item_name, 'TRANSFER_IN',
+        v_qty, v_to_prev_qty, v_to_new_qty, v_to_loc, v_caller_name, v_clean_notes, NOW()
+    );
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'from_location', v_from_loc,
+        'from_quantity', v_from_new_qty,
+        'to_location', v_to_loc,
+        'to_quantity', v_to_new_qty,
+        'transferred_quantity', v_qty
+    );
+END;
+$$;
+
 GRANT EXECUTE ON FUNCTION public.execute_stock_movement(TEXT, TEXT, TEXT, NUMERIC, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.execute_stock_transfer(TEXT, TEXT, TEXT, NUMERIC, TEXT) TO authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 3. Helper Functions for Cryptographic JWT & RLS Tenant Evaluation
@@ -299,7 +450,8 @@ BEGIN
     FROM public.users 
     WHERE id::text = auth.uid()::text OR email = auth.jwt()->>'email'
     LIMIT 1;
-    RETURN COALESCE(v_role, auth.jwt()->'user_metadata'->>'role', 'User');
+
+    RETURN COALESCE(v_role, 'User');
 END;
 $$;
 
@@ -313,12 +465,18 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
     v_email TEXT;
+    v_clean TEXT := LOWER(TRIM(p_identifier));
 BEGIN
+    IF v_clean IS NULL OR LENGTH(v_clean) < 1 THEN
+        RETURN NULL;
+    END IF;
+
     SELECT email INTO v_email 
     FROM public.users 
-    WHERE (LOWER(username) = LOWER(TRIM(p_identifier)) OR LOWER(email) = LOWER(TRIM(p_identifier)))
+    WHERE (LOWER(username) = v_clean OR LOWER(email) = v_clean)
       AND status = 'Active'
     LIMIT 1;
+
     RETURN v_email;
 END;
 $$;
@@ -392,11 +550,17 @@ CREATE POLICY "Tenant isolation inventory" ON public.inventory
   USING (tenant_id = public.get_auth_tenant_id() OR public.get_auth_role() = 'Superadmin')
   WITH CHECK (tenant_id = public.get_auth_tenant_id() OR public.get_auth_role() = 'Superadmin');
 
--- 4. Inventory History Table Policies
+-- 4. Inventory History Table Policies (Immutable Append-Only Ledger)
 DROP POLICY IF EXISTS "Tenant isolation inventory_history" ON public.inventory_history;
-CREATE POLICY "Tenant isolation inventory_history" ON public.inventory_history
-  FOR ALL TO authenticated
-  USING (tenant_id = public.get_auth_tenant_id() OR public.get_auth_role() = 'Superadmin')
+DROP POLICY IF EXISTS "Tenant select inventory_history" ON public.inventory_history;
+DROP POLICY IF EXISTS "Tenant insert inventory_history" ON public.inventory_history;
+
+CREATE POLICY "Tenant select inventory_history" ON public.inventory_history
+  FOR SELECT TO authenticated
+  USING (tenant_id = public.get_auth_tenant_id() OR public.get_auth_role() = 'Superadmin');
+
+CREATE POLICY "Tenant insert inventory_history" ON public.inventory_history
+  FOR INSERT TO authenticated
   WITH CHECK (tenant_id = public.get_auth_tenant_id() OR public.get_auth_role() = 'Superadmin');
 
 -- 5. Users Table Policies (Recursion-Safe)
@@ -406,17 +570,17 @@ CREATE POLICY "Tenant isolation users" ON public.users
   USING (
     id::text = auth.uid()::text 
     OR email = auth.jwt()->>'email'
-    OR (auth.jwt()->'user_metadata'->>'role') = 'Superadmin'
+    OR public.get_auth_role() = 'Superadmin'
     OR tenant_id = public.get_auth_tenant_id()
   )
   WITH CHECK (
     id::text = auth.uid()::text 
     OR email = auth.jwt()->>'email'
-    OR (auth.jwt()->'user_metadata'->>'role') = 'Superadmin'
+    OR public.get_auth_role() = 'Superadmin'
     OR tenant_id = public.get_auth_tenant_id()
   );
 
--- Elevation Protection Trigger on public.users
+-- Elevation Protection Trigger on public.users (BEFORE INSERT OR UPDATE)
 CREATE OR REPLACE FUNCTION public.fn_protect_user_elevation()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -432,68 +596,93 @@ BEGIN
     v_caller_role := public.get_auth_role();
     v_caller_tenant := public.get_auth_tenant_id();
 
-    -- Rule A: Role Modification Guard
-    IF (NEW.role IS DISTINCT FROM OLD.role) THEN
-        -- Only Superadmin or Admin can change roles
-        IF v_caller_role NOT IN ('Superadmin', 'Admin') THEN
-            RAISE EXCEPTION 'Security Exception (403): You are not authorized to modify user roles.';
-        END IF;
-
-        -- If caller is Admin:
-        -- 1. Must be in their own facility
-        -- 2. Cannot modify a Superadmin's role
-        -- 3. CANNOT promote anyone to Superadmin (Only Superadmin can create/assign Superadmin)
-        IF v_caller_role = 'Admin' THEN
-            IF OLD.tenant_id <> v_caller_tenant THEN
-                RAISE EXCEPTION 'Security Exception (403): Admins can only manage user roles within their assigned facility.';
-            END IF;
-            IF OLD.role = 'Superadmin' THEN
-                RAISE EXCEPTION 'Security Exception (403): Admins cannot modify Superadmin accounts.';
-            END IF;
+    -- A. INSERT GUARD (Prevents self-registration with elevated roles)
+    IF TG_OP = 'INSERT' THEN
+        IF v_caller_role = 'Superadmin' THEN
+            RETURN NEW;
+        ELSIF v_caller_role = 'Admin' THEN
             IF NEW.role = 'Superadmin' THEN
-                RAISE EXCEPTION 'Security Exception (403): Unauthorized. Only a Superadmin can assign the Superadmin role.';
+                RAISE EXCEPTION 'Security Exception (403): Admins cannot create Superadmin accounts.';
+            END IF;
+            IF NEW.tenant_id <> v_caller_tenant THEN
+                RAISE EXCEPTION 'Security Exception (403): Admins can only create users in their assigned facility.';
+            END IF;
+        ELSIF v_caller_role = 'Manager' THEN
+            IF NEW.role <> 'User' THEN
+                RAISE EXCEPTION 'Security Exception (403): Managers can only create standard User accounts.';
+            END IF;
+            IF NEW.tenant_id <> v_caller_tenant THEN
+                RAISE EXCEPTION 'Security Exception (403): Managers can only create users in their assigned facility.';
+            END IF;
+        ELSE
+            NEW.role := 'User';
+            IF NEW.tenant_id IS NULL OR NEW.tenant_id = '' THEN
+                NEW.tenant_id := 'tenant-default';
             END IF;
         END IF;
+        RETURN NEW;
     END IF;
 
-    -- Rule B: Facility / Tenant Assignment Guard (Superadmin Only)
-    IF (NEW.tenant_id IS DISTINCT FROM OLD.tenant_id) THEN
-        IF v_caller_role <> 'Superadmin' THEN
-            RAISE EXCEPTION 'Security Exception (403): Only Superadmins are authorized to modify user facility assignments.';
-        END IF;
-    END IF;
+    -- B. UPDATE GUARD (Prevents privilege elevation or unauthorized profile changes)
+    IF TG_OP = 'UPDATE' THEN
+        -- Rule 1: Role Modification Guard
+        IF (NEW.role IS DISTINCT FROM OLD.role) THEN
+            IF v_caller_role NOT IN ('Superadmin', 'Admin') THEN
+                RAISE EXCEPTION 'Security Exception (403): You are not authorized to modify user roles.';
+            END IF;
 
-    -- Rule C: Status Modification Guard (Active / Suspended)
-    IF (NEW.status IS DISTINCT FROM OLD.status) THEN
-        IF v_caller_role NOT IN ('Superadmin', 'Admin', 'Manager') THEN
-            RAISE EXCEPTION 'Security Exception (403): Standard users cannot modify account status.';
-        END IF;
-
-        IF v_caller_role = 'Admin' THEN
-            IF OLD.tenant_id <> v_caller_tenant OR OLD.role = 'Superadmin' THEN
-                RAISE EXCEPTION 'Security Exception (403): Admins can only modify status for team members in their own facility and cannot modify Superadmins.';
+            IF v_caller_role = 'Admin' THEN
+                IF OLD.tenant_id <> v_caller_tenant THEN
+                    RAISE EXCEPTION 'Security Exception (403): Admins can only manage user roles within their assigned facility.';
+                END IF;
+                IF OLD.role = 'Superadmin' THEN
+                    RAISE EXCEPTION 'Security Exception (403): Admins cannot modify Superadmin accounts.';
+                END IF;
+                IF NEW.role = 'Superadmin' THEN
+                    RAISE EXCEPTION 'Security Exception (403): Unauthorized. Only a Superadmin can assign the Superadmin role.';
+                END IF;
             END IF;
         END IF;
 
-        IF v_caller_role = 'Manager' THEN
-            IF OLD.tenant_id <> v_caller_tenant OR OLD.role IN ('Superadmin', 'Admin', 'Manager') THEN
-                RAISE EXCEPTION 'Security Exception (403): Managers can only modify status for standard users in their own facility.';
+        -- Rule 2: Facility / Tenant Assignment Guard (Superadmin Only)
+        IF (NEW.tenant_id IS DISTINCT FROM OLD.tenant_id) THEN
+            IF v_caller_role <> 'Superadmin' THEN
+                RAISE EXCEPTION 'Security Exception (403): Only Superadmins are authorized to modify user facility assignments.';
             END IF;
         END IF;
-    END IF;
 
-    -- Rule D: Profile Editing Guard
-    IF (OLD.id::text <> auth.uid()::text AND (auth.jwt()->>'email' IS NULL OR OLD.email <> auth.jwt()->>'email')) THEN
-        IF v_caller_role NOT IN ('Superadmin', 'Admin', 'Manager') THEN
-            RAISE EXCEPTION 'Security Exception (403): Users can only modify their own profile.';
+        -- Rule 3: Status Modification Guard (Active / Suspended)
+        IF (NEW.status IS DISTINCT FROM OLD.status) THEN
+            IF v_caller_role NOT IN ('Superadmin', 'Admin', 'Manager') THEN
+                RAISE EXCEPTION 'Security Exception (403): Standard users cannot modify account status.';
+            END IF;
+
+            IF v_caller_role = 'Admin' THEN
+                IF OLD.tenant_id <> v_caller_tenant OR OLD.role = 'Superadmin' THEN
+                    RAISE EXCEPTION 'Security Exception (403): Admins can only modify status for team members in their own facility and cannot modify Superadmins.';
+                END IF;
+            END IF;
+
+            IF v_caller_role = 'Manager' THEN
+                IF OLD.tenant_id <> v_caller_tenant OR OLD.role IN ('Superadmin', 'Admin', 'Manager') THEN
+                    RAISE EXCEPTION 'Security Exception (403): Managers can only modify status for standard users in their own facility.';
+                END IF;
+            END IF;
         END IF;
 
-        IF v_caller_role = 'Admin' AND (OLD.tenant_id <> v_caller_tenant OR OLD.role = 'Superadmin') THEN
-            RAISE EXCEPTION 'Security Exception (403): Admins cannot edit profiles of Superadmins or users outside their assigned facility.';
-        END IF;
+        -- Rule 4: Profile Editing Guard
+        IF (OLD.id::text <> auth.uid()::text AND (auth.jwt()->>'email' IS NULL OR OLD.email <> auth.jwt()->>'email')) THEN
+            IF v_caller_role NOT IN ('Superadmin', 'Admin', 'Manager') THEN
+                RAISE EXCEPTION 'Security Exception (403): Users can only modify their own profile.';
+            END IF;
 
-        IF v_caller_role = 'Manager' AND (OLD.tenant_id <> v_caller_tenant OR OLD.role IN ('Superadmin', 'Admin', 'Manager')) THEN
-            RAISE EXCEPTION 'Security Exception (403): Managers cannot edit profiles of Admins, Superadmins, or users outside their assigned facility.';
+            IF v_caller_role = 'Admin' AND (OLD.tenant_id <> v_caller_tenant OR OLD.role = 'Superadmin') THEN
+                RAISE EXCEPTION 'Security Exception (403): Admins cannot edit profiles of Superadmins or users outside their assigned facility.';
+            END IF;
+
+            IF v_caller_role = 'Manager' AND (OLD.tenant_id <> v_caller_tenant OR OLD.role IN ('Superadmin', 'Admin', 'Manager')) THEN
+                RAISE EXCEPTION 'Security Exception (403): Managers cannot edit profiles of Admins, Superadmins, or users outside their assigned facility.';
+            END IF;
         END IF;
     END IF;
 
@@ -503,7 +692,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, auth, pg_temp;
 
 DROP TRIGGER IF EXISTS trg_protect_user_elevation ON public.users;
 CREATE TRIGGER trg_protect_user_elevation
-BEFORE UPDATE ON public.users
+BEFORE INSERT OR UPDATE ON public.users
 FOR EACH ROW EXECUTE FUNCTION public.fn_protect_user_elevation();
 
 -- Performance Indexes

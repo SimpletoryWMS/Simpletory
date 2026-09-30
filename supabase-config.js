@@ -298,15 +298,15 @@
           }
 
           if (!profile) {
-            // First-time profile generation for auth user
+            // First-time profile generation for auth user - strictly default to standard 'User' role
             const meta = authData.user.user_metadata || {};
             profile = {
               id: authData.user.id,
-              tenant_id: meta.tenant_id || tenantId || 'org-primary',
+              tenant_id: meta.tenant_id || tenantId || 'tenant-default',
               username: meta.username || cleanUsername.split('@')[0],
               email: authData.user.email,
               full_name: meta.full_name || 'Warehouse User',
-              role: meta.role || 'User',
+              role: 'User',
               status: 'Active',
               last_login_at: new Date().toISOString(),
               created_at: new Date().toISOString()
@@ -400,12 +400,15 @@
 
     recordActivity() {
       const now = Date.now().toString();
-      sessionStorage.setItem('simpletory_last_activity', now);
+      localStorage.setItem('simpletory_last_activity', now);
     }
 
     isSessionTimedOut() {
-      const raw = sessionStorage.getItem('simpletory_last_activity');
-      if (!raw) return false;
+      const raw = localStorage.getItem('simpletory_last_activity');
+      if (!raw) {
+        this.recordActivity();
+        return false;
+      }
       const last = parseInt(raw, 10);
       const THIRTY_MINUTES = 30 * 60 * 1000;
       return (Date.now() - last) > THIRTY_MINUTES;
@@ -420,7 +423,7 @@
         }
       }
       sessionStorage.removeItem('simpletory_local_session');
-      sessionStorage.removeItem('simpletory_last_activity');
+      localStorage.removeItem('simpletory_last_activity');
       this.currentUser = null;
       this.notifySubscribers('auth', null);
     }
@@ -613,53 +616,32 @@
 
     async executeStockMovement({ itemId, location, actionType, quantityChange, notes }) {
       const tenantId = this.activeTenantId;
+      const cleanLoc = location ? location.trim().toUpperCase() : '';
+      const cleanAction = actionType ? actionType.trim().toUpperCase() : 'ADJUST';
+      const cleanQty = Number(quantityChange);
 
       if (this.isSupabaseConnected && this.client) {
-        try {
-          const rpcParams = {
-            p_item_id: itemId,
-            p_location: location.trim().toUpperCase(),
-            p_action_type: actionType,
-            p_quantity_change: Number(quantityChange),
-            p_notes: notes || ''
-          };
-          if (tenantId) rpcParams.p_tenant_id = tenantId;
+        const { data, error } = await this.client.rpc('execute_stock_movement', {
+          p_item_id: itemId,
+          p_location: cleanLoc,
+          p_action_type: cleanAction,
+          p_quantity_change: cleanQty,
+          p_notes: notes || null
+        });
 
-          let res = await this.client.rpc('execute_stock_movement', rpcParams);
-          if (res.error && res.error.message && res.error.message.includes('schema cache')) {
-            // DB has 5-param signature deployed
-            delete rpcParams.p_tenant_id;
-            res = await this.client.rpc('execute_stock_movement', rpcParams);
-          }
-
-          if (res.error) throw res.error;
-          if (res.data && res.data.success === false) {
-            throw new Error(res.data.error || 'Failed to record stock movement.');
-          }
-          this.notifySubscribers('inventory');
-          this.notifySubscribers('inventory_history');
-          return res.data;
-        } catch (rpcErr) {
-          console.warn('RPC execute_stock_movement fallback to standard pipeline:', rpcErr);
+        if (error) throw error;
+        if (!data || data.success === false) {
+          throw new Error(data?.error || 'Failed to record stock movement.');
         }
+
+        this.notifySubscribers('inventory');
+        this.notifySubscribers('inventory_history');
+        return data;
       }
 
+      // Offline / Local Store Fallback
       const items = await this.getItems(tenantId);
-      let targetItem = items.find(i => i.id === itemId);
-
-      if (!targetItem && this.isSupabaseConnected && this.client) {
-        try {
-          const { data: directItem } = await this.client
-            .from('items')
-            .select('*')
-            .eq('id', itemId)
-            .maybeSingle();
-          if (directItem) targetItem = directItem;
-        } catch (itemLookupErr) {
-          console.warn('Direct item lookup notice:', itemLookupErr);
-        }
-      }
-
+      let targetItem = (items || []).find(i => i.id === itemId);
       if (!targetItem) {
         const allLocal = this.getLocalDB().items || [];
         targetItem = allLocal.find(i => i.id === itemId);
@@ -668,17 +650,20 @@
       if (!targetItem) throw new Error('Item not found in catalog. Please verify that this SKU is created in this facility.');
 
       const inventories = await this.getInventory(tenantId);
-      let invRecord = inventories.find(inv => inv.item_id === itemId && inv.location === location.trim().toUpperCase());
+      let invRecord = inventories.find(inv => inv.item_id === itemId && inv.location === cleanLoc);
 
       const previousQty = invRecord ? Number(invRecord.quantity) : 0;
       let newQty = previousQty;
 
-      if (actionType === 'ADD') {
-        newQty = previousQty + Math.abs(Number(quantityChange));
-      } else if (actionType === 'SUBTRACT') {
-        newQty = Math.max(0, previousQty - Math.abs(Number(quantityChange)));
-      } else if (actionType === 'ADJUST') {
-        newQty = Math.max(0, Number(quantityChange));
+      if (cleanAction === 'ADD') {
+        newQty = previousQty + Math.abs(cleanQty);
+      } else if (cleanAction === 'SUBTRACT') {
+        if (previousQty < Math.abs(cleanQty)) {
+          throw new Error(`Insufficient stock at location ${cleanLoc}: Available ${previousQty}, requested ${Math.abs(cleanQty)}.`);
+        }
+        newQty = previousQty - Math.abs(cleanQty);
+      } else if (cleanAction === 'ADJUST') {
+        newQty = Math.max(0, cleanQty);
       }
 
       const calculatedChange = newQty - previousQty;
@@ -688,7 +673,7 @@
         id: invRecord ? invRecord.id : `inv-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
         tenant_id: tenantId,
         item_id: itemId,
-        location: location.trim().toUpperCase(),
+        location: cleanLoc,
         quantity: newQty,
         status: status,
         updated_at: new Date().toISOString()
@@ -700,27 +685,15 @@
         item_id: itemId,
         sku: targetItem.sku,
         item_name: targetItem.name,
-        action_type: actionType,
+        action_type: cleanAction,
         qty_change: calculatedChange,
         previous_qty: previousQty,
         new_qty: newQty,
-        location: location.trim().toUpperCase(),
+        location: cleanLoc,
         user_name: this.currentUser?.full_name || 'Warehouse Staff',
-        notes: notes || `${actionType} operation executed`,
+        notes: notes || `${cleanAction} operation executed`,
         created_at: new Date().toISOString()
       };
-
-      if (this.isSupabaseConnected && this.client) {
-        const { error: invErr } = await this.client
-          .from('inventory')
-          .upsert(updatedInv, { onConflict: 'tenant_id,item_id,location' });
-        if (invErr) throw invErr;
-        const { error: histErr } = await this.client.from('inventory_history').insert(historyLog);
-        if (histErr) console.warn('History insert log notice:', histErr);
-        this.notifySubscribers('inventory');
-        this.notifySubscribers('inventory_history');
-        return { inventory: updatedInv, history: historyLog };
-      }
 
       const db = this.getLocalDB();
       const existingInvIdx = db.inventory.findIndex(inv => inv.id === updatedInv.id || (inv.item_id === itemId && inv.location === updatedInv.location && inv.tenant_id === tenantId));
@@ -740,27 +713,49 @@
     async transferStock({ itemId, fromLocation, toLocation, quantity, notes }) {
       const qty = Math.abs(Number(quantity));
       if (qty <= 0) throw new Error('Quantity must be greater than 0');
-      if (fromLocation.trim().toUpperCase() === toLocation.trim().toUpperCase()) {
+      const cleanFrom = fromLocation ? fromLocation.trim().toUpperCase() : '';
+      const cleanTo = toLocation ? toLocation.trim().toUpperCase() : '';
+      if (cleanFrom === cleanTo) {
         throw new Error('Destination location must be different from source location.');
       }
 
+      if (this.isSupabaseConnected && this.client) {
+        const { data, error } = await this.client.rpc('execute_stock_transfer', {
+          p_item_id: itemId,
+          p_from_location: cleanFrom,
+          p_to_location: cleanTo,
+          p_quantity: qty,
+          p_notes: notes || null
+        });
+
+        if (error) throw error;
+        if (!data || data.success === false) {
+          throw new Error(data?.error || 'Failed to record stock transfer.');
+        }
+
+        this.notifySubscribers('inventory');
+        this.notifySubscribers('inventory_history');
+        return data;
+      }
+
+      // Offline / Local Store Fallback
       await this.executeStockMovement({
         itemId,
-        location: fromLocation,
+        location: cleanFrom,
         actionType: 'SUBTRACT',
         quantityChange: qty,
-        notes: `Transfer to ${toLocation.trim().toUpperCase()}: ${notes || ''}`
+        notes: `Transfer to ${cleanTo}: ${notes || ''}`
       });
 
       await this.executeStockMovement({
         itemId,
-        location: toLocation,
+        location: cleanTo,
         actionType: 'ADD',
         quantityChange: qty,
-        notes: `Transfer from ${fromLocation.trim().toUpperCase()}: ${notes || ''}`
+        notes: `Transfer from ${cleanFrom}: ${notes || ''}`
       });
 
-      return true;
+      return { success: true };
     }
 
     async createUser({ username, email, password, fullName, role, tenantId }) {
@@ -848,6 +843,25 @@
 
       if (this.isSupabaseConnected && this.client) {
         if (wantsPasswordChange) {
+          if (!currentPassword || !currentPassword.trim()) {
+            throw new Error('Please enter your current password to authorize this change.');
+          }
+
+          const userEmail = this.currentUser?.email;
+          if (!userEmail) {
+            throw new Error('Unable to verify account credentials for password change.');
+          }
+
+          // Re-authenticate to ensure current password is valid
+          const { error: reauthErr } = await this.client.auth.signInWithPassword({
+            email: userEmail,
+            password: currentPassword.trim()
+          });
+
+          if (reauthErr) {
+            throw new Error('Incorrect current password. Password change denied.');
+          }
+
           const { error: pwdErr } = await this.client.auth.updateUser({
             password: password.trim()
           });
